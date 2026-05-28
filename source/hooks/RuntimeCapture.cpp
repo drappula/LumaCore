@@ -14,7 +14,6 @@
 namespace {
     // ── function type aliases (alphabetical) ─────────────────────────────────
     using BuildSpawnEnvBlock_t           = __int64(*)(void*, uint64_t*, void*, void*, uint64_t*, void*, int, void*, void*, unsigned int, char);
-    using OptedInMask_t                  = __int64(*)(void*, unsigned int);
     using CUtlBufferEnsureCapacity_t     = void*(*)(CUtlBuffer*, int);
     using CUtlMemoryGrow_t               = void*(*)(CUtlVector<AppId_t>*, int);
     using GetAppDataFromAppInfo_t        = int64(*)(void*, AppId_t, const char*, uint8*, int32);
@@ -55,6 +54,13 @@ namespace {
     uint8_t*              g_spawnProcessTarget = nullptr;
     PVOID                 g_vehHandle          = nullptr;
     std::atomic<AppId_t>  g_OnlineFixRealAppId{0};
+    // Pipe-scoped fine gate that pairs with the thread-local depth counter
+    // below. Stamped by EnterStatsScope on entry to an IClientUserStats IPC,
+    // cleared by LeaveStatsScope on exit. The achievement-callback rewrite
+    // path in PackagePatch.cpp and CmdUtils.cpp reads this under acquire
+    // ordering so cross-pipe bleed cannot land a rewrite on a pipe that did
+    // not originate the user-stats call.
+    std::atomic<HSteamPipe> g_StatsScopePipe{0};
     // Scoped real-appid override depth for IClientUserStats traffic.
     // Thread-local so concurrent IPC pipes from worker threads don't bleed
     // into each other. Incremented by SetUserStatsContext(true), decremented
@@ -126,23 +132,6 @@ namespace {
                                     pOverlayCGameID, a6, a7, a8, a9, a10, a11);
     }
 
-    // ── OptedInMask Detours hook ──────────────────────────────────────────────
-    // CSteamController::OptedInMask(appid) returns the Steam Input opt-in mask
-    // and sets SDL_GAMECONTROLLER_* env vars for the spawned process.
-    // When -onlinefix rewrites the game's CGameID to 480 (Spacewar), this function
-    // gets called with appid=480 and returns Spacewar's empty mask — no controller,
-    // no SDL env vars. We redirect to the real appid so controllers work correctly.
-    LC_HOOK_DEF(OptedInMask, __int64, void* pThis, unsigned int appId)
-    {
-        AppId_t realAppId = g_OnlineFixRealAppId.load(std::memory_order_acquire);
-        if (appId == kOnlineFixAppId && realAppId) {
-            LOG_MISC_INFO("OptedInMask: appid {} -> {}", appId, realAppId);
-            return oOptedInMask(pThis, realAppId);
-        }
-        LOG_MISC_TRACE("OptedInMask: appid {} (realAppId={}, no redirect)", appId, realAppId);
-        return oOptedInMask(pThis, appId);
-    }
-
     // ── MarkLicenseAsChanged Detours hook ────────────────────────────────────
     // Captures pCUser (RCX = this) on first call, then triggers startup injection.
     // This replaces the old VEH int3 capture — Detours fires on every call
@@ -179,7 +168,12 @@ namespace {
         LuaLoader::QueueStartupInjection();
         std::vector<AppId_t> additions = LuaLoader::TakePendingAdditions();
         if (!PackagePatch::InjectIntoPackage0(additions)) {
-            LOG_PACKAGE_WARN("DoStartupInjection: package 0 not captured yet, injection failed");
+            // First DoStartupInjection fires before GetPackageInfo has captured
+            // the CPackageInfo pointer (~1 ms gap during login). The retry
+            // path inside GetPackageInfo's hook runs the injection again the
+            // moment the pointer arrives, so this is benign startup ordering,
+            // not a hook failure. Keep at debug to avoid scaring users.
+            LOG_PACKAGE_DEBUG("DoStartupInjection: package 0 not captured yet, deferring");
             g_startupInjectionDone.store(false);
             return;
         }
@@ -297,10 +291,20 @@ namespace SteamCapture {
 
         VEH_TRACK_LIST(VEH_LOCATE)
 
-        ARM_CAPTURE_STR_D(GetAppDataFromAppInfo, g_pCAppInfoCache,
-                          GetAppDataFromAppInfoStrSigs, GetAppDataFromAppInfoSigs);
+        // GetAppDataFromAppInfo: lives in CAppInfoCache. The xref is the
+        // unique "name_localized/%s" literal the analyzer pinned the function
+        // by. ByteSearch resolves the hook through the per-build TOML; the
+        // xref is only kept as informational metadata for log readers and
+        // for future TOML re-publishing.
+        {
+            static constexpr StringXRefSig kAppDataStrSigs[] = {
+                {"GetAppDataFromAppInfo", "name_localized/%s"},
+            };
+            ARM_CAPTURE_STR_TOML_D(GetAppDataFromAppInfo, g_pCAppInfoCache,
+                                   kAppDataStrSigs, std::size(kAppDataStrSigs));
+        }
 
-        if (auto* _sp_ = FIND_SIG(diversion_hModule, SpawnProcess)) {
+        if (auto* _sp_ = ByteSearch(diversion_hModule, "SpawnProcess")) {
             g_spawnProcessTarget = static_cast<uint8_t*>(_sp_);
             VehUtil::ArmInt3(_sp_);
         }
@@ -318,7 +322,6 @@ namespace SteamCapture {
         LC_ATTACH_D(GetAppIDForCurrentPipe);
         LC_ATTACH_D(MarkLicenseAsChanged);
         LC_ATTACH_D(GetPackageInfo);
-        LC_ATTACH_D(OptedInMask);
         LC_ATTACH_D(BuildSpawnEnvBlock);
         LC_TX_COMMIT();
     }
@@ -339,12 +342,12 @@ namespace SteamCapture {
         LC_DETACH(GetAppIDForCurrentPipe);
         LC_DETACH(MarkLicenseAsChanged);
         LC_DETACH(GetPackageInfo);
-        LC_DETACH(OptedInMask);
         LC_DETACH(BuildSpawnEnvBlock);
         LC_TX_COMMIT();
 
         VEH_TRACK_LIST(VEH_ZERO_RESOLVE)
         g_OnlineFixRealAppId.store(0, std::memory_order_relaxed);
+        g_StatsScopePipe.store(0, std::memory_order_relaxed);
         g_userStatsAppIdOverrideDepth = 0;
         g_steamEngine   = nullptr;
         g_GameNameCache.clear();
@@ -373,6 +376,10 @@ namespace SteamCapture {
         return GetAppIDForCurrentPipe();
     }
 
+    AppId_t OnlineFixRealAppId() {
+        return g_OnlineFixRealAppId.load(std::memory_order_acquire);
+    }
+
     void SetUserStatsContext(bool active) {
         if (active) {
             ++g_userStatsAppIdOverrideDepth;
@@ -381,6 +388,18 @@ namespace SteamCapture {
         } else {
             LOG_MISC_WARN("SetUserStatsContext(false) called with depth=0; clamping");
         }
+    }
+
+    void EnterStatsScope(HSteamPipe pipe) {
+        g_StatsScopePipe.store(pipe, std::memory_order_release);
+    }
+
+    void LeaveStatsScope() {
+        g_StatsScopePipe.store(0, std::memory_order_release);
+    }
+
+    HSteamPipe StatsScopePipe() {
+        return g_StatsScopePipe.load(std::memory_order_acquire);
     }
 
     void EnsureBufferSize(CUtlBuffer* pWrite, int32 size)

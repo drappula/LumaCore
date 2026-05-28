@@ -58,4 +58,10 @@ inline std::string g_steamBuildId;
 // The fake AppId substituted when -onlinefix is active (Valve's SpaceWar lobby app).
 constexpr AppId_t kOnlineFixAppId = 480;
 
+// Dispatches the PatternFetcher worker for steamui.dll on a detached thread.
+// Defined in entry.cpp. Idempotent: subsequent calls after the first are no-ops.
+// Called from InitThread when steamui.dll is already mapped, and from the
+// SteamUI::LoadModuleWithPath hook when Steam's loader maps it later.
+void DispatchSteamUiPatternFetch();
+
 #endif // ENTRY_H

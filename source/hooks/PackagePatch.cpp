@@ -5,12 +5,65 @@
 
 #include "PackagePatch.h"
 #include "Macros.h"
+#include "RuntimeCapture.h"
 #include "entry.h"
+#include "Steam/Callback.h"
 #include "utils/Ticket.h"
 
 namespace {
     using CUtlMemoryGrow_t = void* (*)(CUtlVector<AppId_t>* pVec, int grow_size);
     CUtlMemoryGrow_t oCUtlMemoryGrow = nullptr;
+
+    // ── OnlineFix achievement-callback rewrite helpers ──────────────────────
+    //
+    // Steam dispatches user-stats callbacks (UserStatsReceived, UserStatsStored,
+    // UserAchievementStored, UserAchievementIconFetched) keyed on the real
+    // appid. OnlineFix games register their callback handlers under appid 480
+    // because LumaCore rewrites the spawn CGameID to 480, so the game never
+    // sees those callbacks until we rewrite m_nGameID back to 480.
+    //
+    // The rewrite path is gated four ways:
+    //   1. coarse  -- thread-local depth counter g_userStatsAppIdOverrideDepth
+    //   2. fine    -- pipe-scoped g_StatsScopePipe stamped by IPCBus on the
+    //                 IClientUserStats dispatch bracket
+    //   3. session -- g_OnlineFixRealAppId != 0
+    //   4. payload -- low 24 bits of m_nGameID equal the real appid
+
+    constexpr int kAchievementCallbackIds[] = {
+        UserStatsReceived_t::k_iCallback,
+        UserStatsStored_t::k_iCallback,
+        UserAchievementStored_t::k_iCallback,
+        UserAchievementIconFetched_t::k_iCallback,
+    };
+
+    static bool IsAchievementCallback(int iCallback) {
+        for (int id : kAchievementCallbackIds)
+            if (id == iCallback) return true;
+        return false;
+    }
+
+    // Rewrites m_nGameID low-24-bits from real appid back to kOnlineFixAppId
+    // when the payload genuinely carries the real appid. Leaves the high 40
+    // bits untouched. Returns false (without mutation) on any mismatch so the
+    // caller's gating chain can short-circuit cleanly.
+    static bool RewriteAchievementCallbackGameId(int iCallback, void* pCallbackData,
+                                                 int cubCallbackData)
+    {
+        AppId_t real = SteamCapture::OnlineFixRealAppId();
+        if (real == 0 || real == kOnlineFixAppId) return false;
+        if (cubCallbackData < static_cast<int>(sizeof(uint64_t))) return false;
+        if (pCallbackData == nullptr) return false;
+
+        auto* pGameId = static_cast<uint64_t*>(pCallbackData);
+        AppId_t current = static_cast<AppId_t>(*pGameId & 0xFFFFFF);
+        if (current != real) return false;
+
+        *pGameId = (*pGameId & ~static_cast<uint64_t>(0xFFFFFF))
+                 | static_cast<uint64_t>(kOnlineFixAppId);
+        LOG_ONLINEFIX_DEBUG("achievement callback {} m_nGameID {} -> {}",
+                            iCallback, real, kOnlineFixAppId);
+        return true;
+    }
 
     // Saved pointer to package 0's PackageInfo — captured from LoadPackage hook.
     // Used by DoStartupInjection to inject apps after hooks are fully installed.
@@ -91,6 +144,35 @@ namespace {
             LOG_PACKAGE_DEBUG("SendCallbackToPipe: AppLicensesChanged m_bReloadAll={} -> true",
                            p->m_bReloadAll);
             p->m_bReloadAll = true;
+            return oSendCallbackToPipe(pSteamEngine, hSteamPipe, iClientUser,
+                                       iCallback, pCallbackData, cubCallbackData);
+        }
+
+        // Achievement-callback dual-dispatch. Gating order:
+        //   * iCallback in Achievement_Callback_Ids
+        //   * pipe scope matches the dispatching pipe
+        //   * payload large enough to carry m_nGameID
+        // The first dispatch leaves the real appid in m_nGameID so any
+        // real-appid binding still receives the callback. The second
+        // dispatch (OnlineFix_Dual_Dispatch) flips m_nGameID's low 24 bits
+        // to kOnlineFixAppId and re-emits, which is what reaches the game's
+        // appid-480 callback registration. RewriteAchievementCallbackGameId
+        // also covers the no-op session and pipe-mismatch paths.
+        if (IsAchievementCallback(iCallback)
+            && SteamCapture::StatsScopePipe() == hSteamPipe
+            && SteamCapture::OnlineFixRealAppId() != 0)
+        {
+            const bool firstOk = oSendCallbackToPipe(pSteamEngine, hSteamPipe, iClientUser,
+                                                     iCallback, pCallbackData, cubCallbackData);
+            if (RewriteAchievementCallbackGameId(iCallback, pCallbackData, cubCallbackData)) {
+                LOG_ONLINEFIX_TRACE("OnlineFix_Dual_Dispatch: cb={} pipe=0x{:08X} -> appid {}",
+                                    iCallback,
+                                    static_cast<uint32_t>(hSteamPipe),
+                                    kOnlineFixAppId);
+                oSendCallbackToPipe(pSteamEngine, hSteamPipe, iClientUser,
+                                    iCallback, pCallbackData, cubCallbackData);
+            }
+            return firstOk;
         }
 
         return oSendCallbackToPipe(pSteamEngine, hSteamPipe, iClientUser,

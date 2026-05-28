@@ -1,4 +1,4 @@
-// LumaCore — Steam client hook layer for SteaMidra.
+// LumaCore - Steam client hook layer for SteaMidra.
 // Copyright (c) 2025-2026 Midrag (https://github.com/Midrags).
 // Distributed under the GNU General Public License v3 or later.
 // See <https://www.gnu.org/licenses/> for the full license text.
@@ -6,9 +6,15 @@
 #include "SteamUI.h"
 #include "CoreLoader.h"
 #include "Macros.h"
+#include "SigTypes.h"
+#include "utils/ByteScan.h"
+#include "utils/HookStatus.h"
 #include "steam_messages.pb.h"
-#include <thread>
+
+#include <psapi.h>
+
 #include <chrono>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -41,9 +47,20 @@ namespace {
     // vtable[22]) also excludes the app on the next full snapshot.
     constexpr size_t kCSteamAppOwnedFlagOffset   = 28;
 
+    // TOML lookup-key candidates for AddProtobufAsBinary. The .xref field
+    // carries the historical string-xref anchor that used to identify the
+    // function before the TOML-only refactor; it stays as documentation so
+    // the analyzer side can still find it. Lookup runs over .name only.
+    static constexpr StringXRefSig AddProtobufAsBinaryStrSigs[] = {
+        { "AddProtobufAsBinary", "CJSMethodArgs::AddProtobufAsBinary" },
+    };
+
     // ▌ STEAMUI ▌ LoadModuleWithPath hook
     LC_HOOK_DEF(LoadModuleWithPath, HMODULE, const char* path, bool flags) {
         LOG_STEAMUICH_INFO("LoadModuleWithPath called with path: {} , flags: {}", path, flags);
+        // First steamui-mapped callback also primes the pattern fetcher worker
+        // when the loader had not mapped steamui.dll at InitThread dispatch.
+        DispatchSteamUiPatternFetch();
         // Wait for steamclient hooks to be installed before redirecting.
         for (int idx = 0; idx < MAX_RETRY && !g_HooksInstalled.load(); ++idx) {
             LOG_STEAMUICH_DEBUG("LoadModuleWithPath: waiting for hooks... (attempt {}/{})", idx + 1, MAX_RETRY);
@@ -55,18 +72,10 @@ namespace {
         return h;
     }
 
-    // ▌ STEAMUI ▌ TopManagerCall decode
-    // The TopManagerCall anchor matches inside MarkAppChange's body.
-    // Decode the rel32 at +10 to find the 2-instruction getter:
-    //   mov rax, [rip+disp]; ret
-    GetTopManager_t DecodeTopManagerGetter(uint8_t* anchor) {
-        if (!anchor) return nullptr;
-        int32_t rel32 = *reinterpret_cast<const int32_t*>(anchor + 10);
-        uint8_t* getter = anchor + 14 + rel32;
-        if (getter[0] != 0x48 || getter[1] != 0x8B || getter[2] != 0x05 || getter[7] != 0xC3)
-            return nullptr;
-        return reinterpret_cast<GetTopManager_t>(getter);
-    }
+    // ▌ STEAMUI ▌ GetTopManager
+    // The pattern publisher schema points GetTopManager directly at the
+    // 2-instruction getter (mov rax, [rip+disp]; ret), so the resolved
+    // address IS the function pointer. No anchor decode, no rel32 walk.
 
     // Fetch the CSteamUIAppController via the captured getter.
     void* ResolveController() {
@@ -119,6 +128,11 @@ namespace {
 
 namespace SteamUI {
 
+    // The LC_* macros target diversion_hModule (steamclient64.dll). SteamUI
+    // hooks live in steamui.dll, so the install path resolves through
+    // ByteSearch(hSteamUI, ...) directly and runs the Detours attach plus
+    // HookStatus reporting by hand. The shape mirrors what LC_ATTACH_D and
+    // LC_RESOLVE_D expand to, just with a different module handle.
     void CoreHook() {
         HMODULE hSteamUI = GetModuleHandleA("steamui.dll");
         if (!hSteamUI) {
@@ -127,26 +141,73 @@ namespace SteamUI {
         }
 
         LC_TX_OPEN();
-        // Byte-pattern only — see PatternDb.h LoadModuleWithPathSigs comment.
-        LC_ATTACH(hSteamUI, LoadModuleWithPath);
+        {
+            void* _p_ = ByteSearch(hSteamUI, "LoadModuleWithPath");
+            if (_p_) {
+                LOG_STEAMUICH_DEBUG("Hook: LoadModuleWithPath attached @ 0x{:X}",
+                                    reinterpret_cast<uintptr_t>(_p_));
+                oLoadModuleWithPath = reinterpret_cast<LoadModuleWithPath_t>(_p_);
+                DetourAttach(reinterpret_cast<PVOID*>(&oLoadModuleWithPath),
+                             reinterpret_cast<PVOID>(hkLoadModuleWithPath));
+                HookStatus::RecordInstalled();
+            } else {
+                LOG_STEAMUICH_WARN("Hook: LoadModuleWithPath skipped (TOML entry missing for steamui)");
+                HookStatus::RecordMissed("LoadModuleWithPath");
+            }
+        }
         LC_TX_COMMIT();
 
-        // Resolve helper functions (no hook, called directly from RemoveAppOverview).
-        LC_RESOLVE(hSteamUI, GetAppByID);
-
-        // AddProtobufAsBinary: try string XRef first, fall back to byte pattern.
+        // Helper resolves (no Detours attach, just bind the trampoline slot).
         {
-            void* _p_ = nullptr;
-            for (const auto& _s_ : AddProtobufAsBinaryStrSigs) {
-                _p_ = StringFind::FindFunction(hSteamUI, _s_.str, _s_.occurrence);
-                if (_p_) break;
+            void* _p_ = ByteSearch(hSteamUI, "GetAppByID");
+            oGetAppByID = reinterpret_cast<GetAppByID_t>(_p_);
+            if (_p_) {
+                LOG_STEAMUICH_DEBUG("Resolve: GetAppByID bound @ 0x{:X}",
+                                    reinterpret_cast<uintptr_t>(_p_));
+                HookStatus::RecordInstalled();
+            } else {
+                LOG_STEAMUICH_WARN("Resolve: GetAppByID skipped (TOML entry missing for steamui)");
+                HookStatus::RecordMissed("GetAppByID");
             }
-            if (!_p_) _p_ = FIND_SIG(hSteamUI, AddProtobufAsBinary);
-            oAddProtobufAsBinary = reinterpret_cast<AddProtobufAsBinary_t>(_p_);
         }
 
-        auto* anchor = static_cast<uint8_t*>(FIND_SIG(hSteamUI, TopManagerCall));
-        oGetTopManager = DecodeTopManagerGetter(anchor);
+        // AddProtobufAsBinary: walk the StringXRefSig array and use the first
+        // candidate name that resolves through the steamui TOML. Each .name
+        // is a TOML lookup key; .xref is documentation only.
+        {
+            void* _p_ = nullptr;
+            const char* _matched_ = nullptr;
+            for (const auto& _s_ : AddProtobufAsBinaryStrSigs) {
+                _p_ = ByteSearch(hSteamUI, _s_.name);
+                if (_p_) { _matched_ = _s_.name; break; }
+            }
+            oAddProtobufAsBinary = reinterpret_cast<AddProtobufAsBinary_t>(_p_);
+            if (_p_) {
+                LOG_STEAMUICH_DEBUG("Resolve: AddProtobufAsBinary bound via TOML key \"{}\" @ 0x{:X}",
+                                    _matched_, reinterpret_cast<uintptr_t>(_p_));
+                HookStatus::RecordInstalled();
+            } else {
+                LOG_STEAMUICH_WARN("Resolve: AddProtobufAsBinary skipped (no TOML key in array resolved)");
+                HookStatus::RecordMissed("AddProtobufAsBinary");
+            }
+        }
+
+        // GetTopManager: per the canonical pattern publisher schema, rva
+        // points directly at the 2-instruction getter
+        // (mov rax, [rip+disp]; ret). No rel32 decode needed; the resolved
+        // address IS the function pointer we call.
+        {
+            void* _p_ = ByteSearch(hSteamUI, "GetTopManager");
+            oGetTopManager = reinterpret_cast<GetTopManager_t>(_p_);
+            if (_p_) {
+                LOG_STEAMUICH_DEBUG("Resolve: GetTopManager bound @ 0x{:X}",
+                                    reinterpret_cast<uintptr_t>(_p_));
+                HookStatus::RecordInstalled();
+            } else {
+                LOG_STEAMUICH_WARN("Resolve: GetTopManager skipped (TOML entry missing for steamui)");
+                HookStatus::RecordMissed("GetTopManager");
+            }
+        }
 
         LOG_STEAMUICH_INFO("Install: GetAppByID={}, AddProtobufAsBinary={}, GetTopManager={}",
                          reinterpret_cast<void*>(oGetAppByID),
@@ -177,9 +238,9 @@ namespace SteamUI {
         }
 
         // Clear the host-side CSteamApp owned flag if a CSteamApp exists for
-        // this id. Sub-depots (e.g. HL1's 221-234) won't have one — that's
-        // fine, just skip the flag-clear and still emit the removal so any
-        // stale subscriber state for the id gets cleaned up. Mirrors OST.
+        // this id. Sub-depots (e.g. HL1's 221-234) won't have one, so just
+        // skip the flag-clear and still emit the removal so any stale
+        // subscriber state for the id gets cleaned up.
         if (void* pApp = oGetAppByID(pController, appId, /*create=*/false)) {
             *reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(pApp) + kCSteamAppOwnedFlagOffset) &= ~1u;
         }
@@ -189,7 +250,7 @@ namespace SteamUI {
         LOG_STEAMUICH_INFO("RemoveAppOverview: appId={} done", appId);
     }
 
-    // Kept for API stability — only used when callers explicitly want a
+    // Kept for API stability; only used when callers explicitly want a
     // multi-id dispatch. The live NotifyLicenseChanged path uses per-id
     // RemoveAppOverview because Steam's webhelper handler crashes on
     // multi-id CAppOverview_Change bursts in some build/load combos.
@@ -201,3 +262,4 @@ namespace SteamUI {
     }
 
 } // namespace SteamUI
+

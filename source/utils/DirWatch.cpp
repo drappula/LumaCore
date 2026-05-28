@@ -1,4 +1,4 @@
-// LumaCore — Steam client hook layer for SteaMidra.
+// LumaCore - Steam client hook layer for SteaMidra.
 // Copyright (c) 2025-2026 Midrag (https://github.com/Midrags).
 // Distributed under the GNU General Public License v3 or later.
 // See <https://www.gnu.org/licenses/> for the full license text.
@@ -134,8 +134,18 @@ namespace DirWatch {
             }
         }
 
+        // Win32 caps WaitForMultipleObjects at MAXIMUM_WAIT_OBJECTS handles per call.
+        // Apply the cap once; index i of evts must keep mapping to index i of idxMap.
+        if (evts.size() > MAXIMUM_WAIT_OBJECTS) {
+            const size_t preTrunc = evts.size();
+            LOG_PKGCH_WARN("DirWatch: directory count {} exceeds Win32 wait limit {}, truncating",
+                           preTrunc, static_cast<size_t>(MAXIMUM_WAIT_OBJECTS));
+            evts.resize(MAXIMUM_WAIT_OBJECTS);
+            idxMap.resize(MAXIMUM_WAIT_OBJECTS);
+        }
+
         if (evts.empty()) {
-            LOG_PKGCH_WARN("DirWatch: no directories could be opened");
+            LOG_PKGCH_WARN("DirWatch: no directories could be opened, watcher exiting");
             for (auto& s : slots) s.Close();
             return;
         }
@@ -179,6 +189,10 @@ namespace DirWatch {
     }
 
     void Start(const std::vector<std::string>& directories) {
+        if (directories.empty()) {
+            LOG_PKGCH_WARN("DirWatch::Start: no directories configured, watcher not dispatched");
+            return;
+        }
         if (g_alive.exchange(true)) {
             LOG_PKGCH_WARN("DirWatch: already running");
             return;

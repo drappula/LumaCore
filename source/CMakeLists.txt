@@ -79,10 +79,13 @@ add_library(LumaCore SHARED
     utils/ByteScan.cpp
     utils/Logger.cpp
     utils/Settings.cpp
-    utils/LuaLoader.cpp
+    utils/LuaState.cpp
+    utils/LuaBindings.cpp
+    utils/LuaQuery.cpp
     utils/VehUtil.cpp
     utils/DirWatch.cpp
     utils/Diagnostics.cpp
+    utils/HookStatus.cpp
 
     # Per-category hook modules
     hooks/CoreLoader.cpp
@@ -96,8 +99,10 @@ add_library(LumaCore SHARED
     hooks/PacketRouter.cpp
     hooks/SteamUI.cpp
     hooks/PackagePatch.cpp
+    hooks/PatternFetcher.cpp
     hooks/RichPresence.cpp
     hooks/LicenseHooks.cpp
+    hooks/StatusWriter.cpp
     hooks/StringFind.cpp
 
     # protobuf generated sources — per-config variant
@@ -120,6 +125,8 @@ target_link_libraries(LumaCore PRIVATE
     $<$<CONFIG:Release>:libprotobuf-lite>
     tomlplusplus::tomlplusplus
     $<$<CONFIG:Debug>:spdlog::spdlog>
+    winhttp
+    bcrypt
 )
 
 # Logging is compiled in only for Debug; Release reduces LOG_* to no-ops.

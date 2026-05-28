@@ -1,4 +1,4 @@
-// LumaCore — Steam client hook layer for SteaMidra.
+// LumaCore - Steam client hook layer for SteaMidra.
 // Copyright (c) 2025-2026 Midrag (https://github.com/Midrags).
 // Distributed under the GNU General Public License v3 or later.
 // See <https://www.gnu.org/licenses/> for the full license text.
@@ -115,20 +115,39 @@ namespace {
         // Scope is open only for IClientUserStats so the lobby /
         // friends / controller / RemoteStorage pass-through that
         // depends on the 480 masquerade stays byte-identical.
-        if (userStatsCall) SteamCapture::SetUserStatsContext(true);
+        // The pipe-scoped fine gate (g_StatsScopePipe) wraps both the
+        // original call AND the post-dispatch handler so CmdUtils
+        // GetAPICallResult rewrites observe the scope.
+        if (userStatsCall) {
+            SteamCapture::SetUserStatsContext(true);
+            SteamCapture::EnterStatsScope(hSteamPipe);
+        }
         const bool outcome = oIPCProcessMessage(pServer, hSteamPipe, pRead, pWrite);
-        if (userStatsCall) SteamCapture::SetUserStatsContext(false);
-        if (!outcome || !handlerEntry) return outcome;
+        if (!outcome || !handlerEntry) {
+            if (userStatsCall) {
+                SteamCapture::LeaveStatsScope();
+                SteamCapture::SetUserStatsContext(false);
+            }
+            return outcome;
+        }
 
         // Only run handlers for apps with configured depots.
         AppId_t appId = SteamCapture::ResolveAppId();
         if (!LuaLoader::HasDepot(appId)) {
             LOG_IPCCH_INFO("{}: appId={} has no configured depot, skip handler {}",
                 handlerEntry->name, appId, pipe ? pipe->DebugString() : "pipe=null");
+            if (userStatsCall) {
+                SteamCapture::LeaveStatsScope();
+                SteamCapture::SetUserStatsContext(false);
+            }
             return outcome;
         }
 
         handlerEntry->handler(pipe, pRead, pWrite);
+        if (userStatsCall) {
+            SteamCapture::LeaveStatsScope();
+            SteamCapture::SetUserStatsContext(false);
+        }
         return outcome;
     }
 

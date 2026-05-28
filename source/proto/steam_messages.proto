@@ -1,5 +1,5 @@
 // proto/steam_messages.proto
-// Steam protobuf response message definitions for OpenSteamTool.
+// Steam protobuf response message definitions used by LumaCore.
 
 syntax = "proto2";
 

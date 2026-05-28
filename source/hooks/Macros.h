@@ -1,16 +1,44 @@
+// LumaCore - Steam client hook layer for SteaMidra.
+// Copyright (c) 2025-2026 Midrag (https://github.com/Midrags).
+// Distributed under the GNU General Public License v3 or later.
+// See <https://www.gnu.org/licenses/> for the full license text.
+
 #pragma once
 
-// Hook plumbing macros for LumaCore. Wraps Microsoft Detours for attaching/detaching
-// function hooks inside loaded DLL modules.
+// Hook plumbing macros for LumaCore. Every address resolution flows through
+// ByteSearch, which reads the per-build <sha>.toml the maintainer published
+// to the pattern repo. When the running Steam build has no TOML, hooks fail
+// clean: ByteSearch returns nullptr, the macro logs a miss into status.json
+// via HookStatus::RecordMissed, and the install pass keeps going. No
+// compiled byte tables, no string-xref scans, no fallback loops.
+//
 // _D variants target diversion_hModule (the hooked copy of steamclient64.dll).
-// All others take an explicit HMODULE to target steamui.dll or any other loaded image.
+// The plain forms are kept as aliases for call sites that prefer the shorter
+// name; both routes resolve against the same module since every hook tracked
+// by this header lives in steamclient. SteamUI hooks call ByteSearch directly
+// against hSteamUI rather than going through these macros.
+//
+// STR_TOML variants iterate a StringXRefSig array of TOML lookup-key
+// candidates and use the first key that resolves. The array exists so the
+// pattern repo can carry either of two names for the same function across
+// build variations (e.g. the legacy KeyValues_ prefix on top of the alias
+// path baked into ByteSearch). The function-name token is passed alongside
+// the array because Detours needs a compile-time trampoline slot
+// (o##fn) and detour function (hk##fn) for the attach.
 
 #include <windows.h>
+#include <cstddef>
+
 #include <detours.h>
+
+#include "SigTypes.h"
 #include "utils/ByteScan.h"
+#include "utils/HookStatus.h"
 #include "utils/Logger.h"
-#include "PatternDb.h"
-#include "StringFind.h"
+
+// diversion_hModule is declared in entry.h. The call sites already include
+// entry.h before reaching the macros; not pulling it in here keeps Macros.h
+// out of any circular include chain with PatternFetcher and StatusWriter.
 
 // Open a Detours transaction. DetourTransactionBegin starts the batch;
 // DetourUpdateThread registers the calling thread so Detours adjusts its
@@ -28,158 +56,167 @@
 
 // Declare a hooked function and its original-pointer trampoline.
 // Expands to:
-//   1. A function-pointer typedef:   typedef HMODULE(__fastcall* LoadModuleWithPath_t)(const char*, bool);
-//   2. The trampoline pointer:        inline LoadModuleWithPath_t oLoadModuleWithPath = nullptr;
-//   3. The hook function signature:   HMODULE __fastcall hkLoadModuleWithPath(const char* path, bool flags)
-// Write the hook body in braces immediately after. Call o<name>(...) to invoke the original.
-#define LC_HOOK_DEF(name, ret, ...)                           \
-    typedef ret(__fastcall* name##_t)(__VA_ARGS__);            \
-    inline name##_t o##name = nullptr;                          \
-    ret __fastcall hk##name(__VA_ARGS__)
+//   1. typedef ret(__fastcall* fn##_t)(args);
+//   2. inline fn##_t o##fn = nullptr;            (trampoline slot)
+//   3. ret __fastcall hk##fn(args)               (hook signature; body in braces)
+// Call o##fn(...) inside the hook body to invoke the original.
+//
+// The fn parameter is named `fn` (not `name`) because StringXRefSig has a
+// `.name` field. Naming the macro parameter `name` would textually replace
+// `.name` field accesses with the function-name token during preprocessing,
+// breaking every STR_TOML batch-attach call site.
+#define LC_HOOK_DEF(fn, ret, ...)                              \
+    typedef ret(__fastcall* fn##_t)(__VA_ARGS__);               \
+    inline fn##_t o##fn = nullptr;                               \
+    ret __fastcall hk##fn(__VA_ARGS__)
 
-// Locate the target via FIND_SIG, store the original in o<name>, redirect to hk<name>.
-// Silently skips if the pattern is not found. Call inside LC_TX_OPEN / LC_TX_COMMIT.
-#define LC_ATTACH(module, name)                                       \
-    do {                                                              \
-        void* _p_ = FIND_SIG(module, name);                            \
-        if (_p_) {                                                    \
-            LOG_DEBUG("Hook: {} attached via byte-pattern @ 0x{:X}", #name, reinterpret_cast<uintptr_t>(_p_)); \
-            o##name = (name##_t)_p_;                                  \
-            DetourAttach(reinterpret_cast<PVOID*>(&o##name),           \
-                         reinterpret_cast<PVOID>(hk##name));           \
-        } else {                                                      \
-            LOG_WARN("Hook: {} FAILED — pattern not found", #name); \
-        }                                                             \
-    } while (0)
-
-#define LC_ATTACH_D(name)            LC_ATTACH(diversion_hModule, name)
-
-// Like LC_ATTACH but accepts an explicit signature array instead of using the
-// PatternDb.h naming convention. Use when the array name differs from the function name.
-#define LC_ATTACH_EX(module, name, sigs)                              \
-    do {                                                              \
-        void* _p_ = ByteSearch(module, #name, sigs, std::size(sigs));  \
-        if (_p_) {                                                    \
-            o##name = (name##_t)_p_;                                  \
-            DetourAttach(reinterpret_cast<PVOID*>(&o##name),           \
-                         reinterpret_cast<PVOID>(hk##name));           \
-        }                                                             \
-    } while (0)
-
-#define LC_ATTACH_EX_D(name, sigs)     LC_ATTACH_EX(diversion_hModule, name, sigs)
-
-// Attach via string XRef only. Use when no reliable byte pattern exists.
-#define LC_ATTACH_STR_ONLY_D(name, strSigs)                                   \
-    do {                                                                       \
-        void* _p_ = nullptr;                                                   \
-        const char* _matched_str_ = nullptr;                                   \
-        for (const auto& _s_ : (strSigs)) {                                    \
-            _p_ = StringFind::FindFunction(diversion_hModule,                  \
-                                           _s_.str, _s_.occurrence);            \
-            if (_p_) { _matched_str_ = _s_.str; break; }                      \
-        }                                                                      \
-        if (_p_) {                                                             \
-            LOG_DEBUG("Hook: {} attached via string-xref \"{}\" @ 0x{:X}", #name, _matched_str_, reinterpret_cast<uintptr_t>(_p_)); \
-            o##name = (name##_t)_p_;                                           \
-            DetourAttach(reinterpret_cast<PVOID*>(&o##name),                   \
-                         reinterpret_cast<PVOID>(hk##name));                   \
-        } else {                                                               \
-            LOG_WARN("Hook: {} FAILED — string-xref not found", #name);  \
-        }                                                                      \
-    } while (0)
-
-// Two-stage attach: string cross-reference first (robust across builds),
-// byte-pattern fallback if no string hit. strSigs = StringXRefSig list; byteSigs = Signature array.
-#define LC_ATTACH_STR_D(name, strSigs, byteSigs)                              \
-    do {                                                                       \
-        void* _p_ = nullptr;                                                   \
-        const char* _matched_str_ = nullptr;                                   \
-        for (const auto& _s_ : (strSigs)) {                                    \
-            _p_ = StringFind::FindFunction(diversion_hModule,                  \
-                                           _s_.str, _s_.occurrence);            \
-            if (_p_) { _matched_str_ = _s_.str; break; }                      \
-        }                                                                      \
-        if (_p_) {                                                             \
-            LOG_DEBUG("Hook: {} attached via string-xref \"{}\" @ 0x{:X}", #name, _matched_str_, reinterpret_cast<uintptr_t>(_p_)); \
-        } else {                                                               \
-            _p_ = ByteSearch(diversion_hModule, #name,                         \
-                             (byteSigs), std::size((byteSigs)));                \
-            if (_p_) {                                                         \
-                LOG_DEBUG("Hook: {} attached via byte-pattern (str-xref missed) @ 0x{:X}", #name, reinterpret_cast<uintptr_t>(_p_)); \
-            } else {                                                           \
-                LOG_WARN("Hook: {} FAILED — both string-xref and byte-pattern missed", #name); \
-            }                                                                  \
-        }                                                                      \
-        if (_p_) {                                                             \
-            o##name = (name##_t)_p_;                                           \
-            DetourAttach(reinterpret_cast<PVOID*>(&o##name),                   \
-                         reinterpret_cast<PVOID>(hk##name));                   \
-        }                                                                      \
-    } while (0)
-
-// Two-stage attach targeting an explicit module (not diversion_hModule).
-// String XRef first, byte-pattern fallback. Used for steamui.dll hooks.
-#define LC_ATTACH_STR(module, name, strSigs, byteSigs)                        \
-    do {                                                                       \
-        void* _p_ = nullptr;                                                   \
-        const char* _matched_str_ = nullptr;                                   \
-        for (const auto& _s_ : (strSigs)) {                                    \
-            _p_ = StringFind::FindFunction((module),                           \
-                                           _s_.str, _s_.occurrence);            \
-            if (_p_) { _matched_str_ = _s_.str; break; }                      \
-        }                                                                      \
-        if (_p_) {                                                             \
-            LOG_DEBUG("Hook: {} attached via string-xref \"{}\" @ 0x{:X}", #name, _matched_str_, reinterpret_cast<uintptr_t>(_p_)); \
-        } else {                                                               \
-            _p_ = ByteSearch((module), #name,                                  \
-                             (byteSigs), std::size((byteSigs)));                \
-            if (_p_) {                                                         \
-                LOG_DEBUG("Hook: {} attached via byte-pattern (str-xref missed) @ 0x{:X}", #name, reinterpret_cast<uintptr_t>(_p_)); \
-            } else {                                                           \
-                LOG_WARN("Hook: {} FAILED — both string-xref and byte-pattern missed", #name); \
-            }                                                                  \
-        }                                                                      \
-        if (_p_) {                                                             \
-            o##name = (name##_t)_p_;                                           \
-            DetourAttach(reinterpret_cast<PVOID*>(&o##name),                   \
-                         reinterpret_cast<PVOID>(hk##name));                   \
-        }                                                                      \
-    } while (0)
-
-// Resolve a function address into o<name> without hooking it.
-// Use to call internal Steam functions directly. No Detours transaction needed.
-#define LC_RESOLVE(module, name) \
-    o##name = reinterpret_cast<name##_t>(FIND_SIG(module, name))
-
-#define LC_RESOLVE_D(name)       LC_RESOLVE(diversion_hModule, name)
-
-#define LC_RESOLVE_EX(module, name, sigs) \
-    o##name = reinterpret_cast<name##_t>(ByteSearch(module, #name, sigs, std::size(sigs)))
-
-#define LC_RESOLVE_EX_D(name, sigs)  LC_RESOLVE_EX(diversion_hModule, name, sigs)
-
-// Two-stage resolve: string XRef first, byte-pattern fallback.
-#define LC_RESOLVE_STR_D(name, strSigs, byteSigs)                              \
-    do {                                                                        \
-        void* _p_ = nullptr;                                                    \
-        for (const auto& _s_ : (strSigs)) {                                     \
-            _p_ = StringFind::FindFunction(diversion_hModule,                   \
-                                           _s_.str, _s_.occurrence);             \
-            if (_p_) break;                                                     \
-        }                                                                       \
-        if (!_p_) _p_ = ByteSearch(diversion_hModule, #name,                   \
-                                    (byteSigs), std::size((byteSigs)));          \
-        o##name = reinterpret_cast<name##_t>(_p_);                              \
-    } while (0)
-
-// Remove a Detours hook and clear the trampoline pointer to nullptr.
-// Safe to call even if the hook was never installed (pattern miss at startup).
+// ── LC_ATTACH_D ─────────────────────────────────────────────────────────────
+// Resolve `fn` against the steamclient TOML via ByteSearch and attach a
+// Detours hook. On miss, log + RecordMissed and skip the install.
 // Call inside LC_TX_OPEN / LC_TX_COMMIT.
-#define LC_DETACH(name)                                               \
-    do {                                                              \
-        if (o##name) {                                                \
-            DetourDetach(reinterpret_cast<PVOID*>(&o##name),           \
-                         reinterpret_cast<PVOID>(hk##name));           \
-            o##name = nullptr;                                        \
-        }                                                             \
+#define LC_ATTACH_D(fn)                                                         \
+    do {                                                                         \
+        void* _p_ = ByteSearch(diversion_hModule, #fn);                          \
+        if (_p_) {                                                               \
+            LOG_DEBUG("Hook: {} attached @ 0x{:X}",                              \
+                      #fn, reinterpret_cast<uintptr_t>(_p_));                    \
+            o##fn = reinterpret_cast<fn##_t>(_p_);                               \
+            DetourAttach(reinterpret_cast<PVOID*>(&o##fn),                       \
+                         reinterpret_cast<PVOID>(hk##fn));                       \
+            HookStatus::RecordInstalled();                                       \
+        } else {                                                                 \
+            LOG_WARN("Hook: {} skipped (TOML entry missing for current build)",  \
+                     #fn);                                                       \
+            HookStatus::RecordMissed(#fn);                                       \
+        }                                                                        \
+    } while (0)
+
+// LC_ATTACH(fn) — alias of LC_ATTACH_D for call sites that prefer the
+// shorter spelling. Both target diversion_hModule. Kept distinct so future
+// non-diversion attach macros can land here without forcing a rename pass.
+#define LC_ATTACH(fn)                LC_ATTACH_D(fn)
+
+// ── LC_ATTACH_STR_TOML_D ────────────────────────────────────────────────────
+// Resolve `fn` against the steamclient TOML by trying every lookup key in
+// `arr` (a `StringXRefSig` array of length `n`) until ByteSearch returns a
+// non-null pointer. Each entry's `.name` field carries a candidate TOML key.
+// The function-name token is passed alongside the array so Detours can bind
+// the compile-time trampoline slot (o##fn) and detour function (hk##fn).
+// On miss, log + RecordMissed and skip the install. Call inside LC_TX_OPEN /
+// LC_TX_COMMIT.
+#define LC_ATTACH_STR_TOML_D(fn, arr, n)                                         \
+    do {                                                                          \
+        void* _p_ = nullptr;                                                      \
+        const char* _matched_ = nullptr;                                          \
+        for (std::size_t _i_ = 0; _i_ < (n) && !_p_; ++_i_) {                     \
+            _p_ = ByteSearch(diversion_hModule, (arr)[_i_].name);                 \
+            if (_p_) _matched_ = (arr)[_i_].name;                                 \
+        }                                                                         \
+        if (_p_) {                                                                \
+            LOG_DEBUG("Hook: {} attached via TOML key \"{}\" @ 0x{:X}",           \
+                      #fn, _matched_, reinterpret_cast<uintptr_t>(_p_));          \
+            o##fn = reinterpret_cast<fn##_t>(_p_);                                \
+            DetourAttach(reinterpret_cast<PVOID*>(&o##fn),                        \
+                         reinterpret_cast<PVOID>(hk##fn));                        \
+            HookStatus::RecordInstalled();                                        \
+        } else {                                                                  \
+            LOG_WARN("Hook: {} skipped (no TOML key in array resolved)",          \
+                     #fn);                                                        \
+            HookStatus::RecordMissed(#fn);                                        \
+        }                                                                         \
+    } while (0)
+
+// LC_ATTACH_STR_TOML — non-diversion alias. Currently behaves the same as
+// the _D form because every batch-attach call site lives in steamclient;
+// kept distinct in case a future steamui batch attach lands here.
+#define LC_ATTACH_STR_TOML(fn, arr, n)   LC_ATTACH_STR_TOML_D(fn, arr, n)
+
+// ── LC_RESOLVE_D ────────────────────────────────────────────────────────────
+// Resolve a function address into o##fn without hooking it. Used to call
+// internal Steam functions directly. No Detours transaction needed.
+#define LC_RESOLVE_D(fn)                                                         \
+    do {                                                                          \
+        void* _p_ = ByteSearch(diversion_hModule, #fn);                           \
+        o##fn = reinterpret_cast<fn##_t>(_p_);                                    \
+        if (_p_) {                                                                \
+            LOG_DEBUG("Resolve: {} bound @ 0x{:X}",                               \
+                      #fn, reinterpret_cast<uintptr_t>(_p_));                     \
+            HookStatus::RecordInstalled();                                        \
+        } else {                                                                  \
+            LOG_WARN("Resolve: {} skipped (TOML entry missing)", #fn);            \
+            HookStatus::RecordMissed(#fn);                                        \
+        }                                                                         \
+    } while (0)
+
+#define LC_RESOLVE(fn)               LC_RESOLVE_D(fn)
+
+// ── LC_RESOLVE_STR_TOML_D ───────────────────────────────────────────────────
+// Resolve into o##fn by trying every lookup key in `arr` (size `n`) until
+// ByteSearch returns non-null. No hook installed. On miss, log + RecordMissed.
+#define LC_RESOLVE_STR_TOML_D(fn, arr, n)                                        \
+    do {                                                                          \
+        void* _p_ = nullptr;                                                      \
+        const char* _matched_ = nullptr;                                          \
+        for (std::size_t _i_ = 0; _i_ < (n) && !_p_; ++_i_) {                     \
+            _p_ = ByteSearch(diversion_hModule, (arr)[_i_].name);                 \
+            if (_p_) _matched_ = (arr)[_i_].name;                                 \
+        }                                                                         \
+        o##fn = reinterpret_cast<fn##_t>(_p_);                                    \
+        if (_p_) {                                                                \
+            LOG_DEBUG("Resolve: {} bound via TOML key \"{}\" @ 0x{:X}",           \
+                      #fn, _matched_, reinterpret_cast<uintptr_t>(_p_));          \
+            HookStatus::RecordInstalled();                                        \
+        } else {                                                                  \
+            LOG_WARN("Resolve: {} skipped (no TOML key in array resolved)",       \
+                     #fn);                                                        \
+            HookStatus::RecordMissed(#fn);                                        \
+        }                                                                         \
+    } while (0)
+
+// ── LC_DETACH ───────────────────────────────────────────────────────────────
+// Remove a Detours hook and clear the trampoline slot. Safe to call even
+// when the install pass earlier skipped the hook (o##fn stays nullptr).
+// Call inside LC_TX_OPEN / LC_TX_COMMIT.
+#define LC_DETACH(fn)                                                            \
+    do {                                                                          \
+        if (o##fn) {                                                              \
+            DetourDetach(reinterpret_cast<PVOID*>(&o##fn),                        \
+                         reinterpret_cast<PVOID>(hk##fn));                        \
+            o##fn = nullptr;                                                      \
+        }                                                                         \
+    } while (0)
+
+// ── ARM_CAPTURE_STR_TOML_D ──────────────────────────────────────────────────
+// RuntimeCapture variant. Resolve `fn` by trying every lookup key in `arr`
+// (size `n`), save the original first byte, push the entry to g_captures, and
+// arm an int3 at the resolved address so the next call into the function
+// triggers the VEH that snapshots `outVar`. Requires g_captures
+// (std::vector<CaptureEntry>) and VehUtil::ArmInt3 in scope at the call site.
+//
+// On miss, log + RecordMissed and leave outVar untouched.
+#define ARM_CAPTURE_STR_TOML_D(fn, outVar, arr, n)                               \
+    do {                                                                          \
+        void* _p_ = nullptr;                                                      \
+        const char* _matched_ = nullptr;                                          \
+        for (std::size_t _i_ = 0; _i_ < (n) && !_p_; ++_i_) {                     \
+            _p_ = ByteSearch(diversion_hModule, (arr)[_i_].name);                 \
+            if (_p_) _matched_ = (arr)[_i_].name;                                 \
+        }                                                                         \
+        if (_p_) {                                                                \
+            LOG_DEBUG("Capture: {} armed via TOML key \"{}\" @ 0x{:X}",           \
+                      #fn, _matched_, reinterpret_cast<uintptr_t>(_p_));          \
+            o##fn = reinterpret_cast<fn##_t>(_p_);                                \
+            g_captures.push_back({                                                \
+                reinterpret_cast<void**>(&o##fn),                                 \
+                reinterpret_cast<void**>(&(outVar)),                              \
+                *reinterpret_cast<uint8_t*>(_p_),                                 \
+                #fn                                                               \
+            });                                                                   \
+            VehUtil::ArmInt3(_p_);                                                \
+            HookStatus::RecordInstalled();                                        \
+        } else {                                                                  \
+            LOG_WARN("Capture: {} skipped (no TOML key in array resolved)",       \
+                     #fn);                                                        \
+            HookStatus::RecordMissed(#fn);                                        \
+        }                                                                         \
     } while (0)

@@ -7,7 +7,6 @@
 #define HOOKMANAGER_H
 
 #include "entry.h"
-#include "PatternDb.h"
 
 namespace SteamUI {
     void CoreHook();

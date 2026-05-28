@@ -70,9 +70,17 @@ namespace Settings {
                 }
             }
 
-            LOG_INFO("Settings: log.level={} log.verbose={} lua.paths_count={}",
+            // [pattern_fetch]
+            if (auto patternTbl = tbl["pattern_fetch"].as_table()) {
+                if (auto m = (*patternTbl)["mirror"].value<std::string>())
+                    patternMirror = *m;
+            }
+
+            LOG_INFO("Settings: log.level={} log.verbose={} lua.paths_count={} "
+                     "pattern_fetch.mirror={}",
                      LevelName(logLevel), verbose ? "true" : "false",
-                     static_cast<uint32_t>(luaPaths.size()));
+                     static_cast<uint32_t>(luaPaths.size()),
+                     patternMirror.empty() ? "<none>" : patternMirror);
 
         } catch (const toml::parse_error& e) {
             LOG_WARN("Settings: TOML parse error: {}", e.what());

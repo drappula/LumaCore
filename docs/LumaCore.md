@@ -12,24 +12,66 @@ Steam loads DLLs from its own directory on startup.  LumaCore exploits this by p
 
 1. Copies `steamclient64.dll` to `bin\lcoverlay.dll` (with retry logic in case the file is locked).
 2. Loads `lcoverlay.dll` explicitly so it has an independent module handle.
-3. Reads the current Steam build ID from `steam.exe!GetBootstrapperVersion` and stores it for pattern-search prioritisation.
-4. Spawns a worker thread that installs all hooks and starts the Lua directory watcher.
+3. Reads the current Steam build ID from `steam.exe!GetBootstrapperVersion` and stores it for diagnostics + status surfacing.
+4. Synchronously primes the runtime pattern cache from disk for both `steamclient64.dll` and `steamui.dll`, so the first hook installer sees a populated pattern map without waiting on the network.
+5. Spawns a worker thread that installs all hooks, kicks off the network refresh path for the per-build pattern files in the background, and starts the Lua directory watcher.
 
 The copy step is necessary because hooking the live `steamclient64.dll` while it is already mapped into the process would require patching code that is in use.  Hooking the private copy avoids race conditions and keeps the original file untouched on disk.
 
 ---
 
-## Byte-pattern search (`utils/ByteScan.cpp`)
+## Pattern resolution (`hooks/PatternFetcher.cpp` + `utils/ByteScan.cpp`)
 
-LumaCore locates Steam internal functions by scanning the loaded DLL image for known byte sequences.  Each function has one or more `Signature` entries in `hooks/PatternDb.h`.  A signature is a hex string where `??` is a wildcard byte.
+LumaCore locates Steam internal functions through a runtime pattern map.  At startup the fetcher hashes `steamclient64.dll` and `steamui.dll` (lowercase hex SHA-256), looks up a matching `<sha>.toml` for each, and stores the parsed entries in an in-memory map keyed by function name.  Each entry is a `name`, an `rva` relative to that DLL's image base, and a byte `sig` (hex with `??` wildcards) used to verify the bytes at that rva before any hook attaches.
 
-At startup the scanner reads the Steam build ID and tries the signature whose label matches that ID first.  If the fast-path entry fails (Steam was updated), it falls back to scanning all remaining entries in order.  If no entry matches, the hook is silently skipped and Steam runs that function unmodified.
+### Pattern file format
 
-For functions that contain unique embedded strings (e.g. assert messages), the scanner can locate the function via a string cross-reference instead of (or before) the byte pattern.  See `hooks/StringFind.cpp` and `hooks/PatternDb.h` comments for details.
+Section keys are FNV-1a 32-bit of the function name (offset basis `0x811c9dc5`, prime `0x01000193`), filenames are the lowercase-hex SHA-256 of the inspected DLL, fields are `name`, `rva`, `sig`:
 
-Note: string cross-reference hooking is available but is not used for critical startup hooks (such as `GetPipeClient` and `IPCProcessMessage` in `IPCBus`).  Those use pure byte-pattern matching to guarantee stable resolution across Steam updates and avoid ambiguous function lookups at early startup.
+```toml
+[0x82428E37]
+name = "BBuildAndAsyncSendFrame"
+rva  = "0xD15DD0"
+sig  = "48 8B C4 55 48 8D 68 A1 48 81 EC C0 00 00 00 48 89 70 18"
+```
 
-Run `cleintcheck/steamclient_analyzer.py` after a Steam update to verify existing patterns and generate updated signatures.
+This is the same schema used by the canonical pattern publisher (`OpenSteam001/steam-monitor` `pattern` branch), so a TOML pulled from there can drop straight into `<Steam>\lumacore\pattern\` and resolve.
+
+### Source priority
+
+For each DLL, the fetcher tries sources in this order:
+
+1. **User mirror** (optional). If `[pattern_fetch] mirror` is set in `lumacore.toml`, the fetcher substitutes `{subdir}` (`steamclient` or `steamui`) and `{sha}` into the URL and treats it as the first try. Any failure (HTTP 4xx/5xx, network error, parse error) logs a debug line and falls through.
+2. **GitHub raw** — `raw.githubusercontent.com/KoriaPolis/Steam-Auto-PT/pattern/<subdir>/<sha>.toml`.
+3. **jsDelivr CDN** — `cdn.jsdelivr.net/gh/KoriaPolis/Steam-Auto-PT@pattern/<subdir>/<sha>.toml`. Used only on transport failure since GitHub raw and jsDelivr serve the same content; a 404 from either short-circuits to the cache step.
+4. **Local cache** — `<Steam>\lumacore\pattern\<sha>.toml`. Always written-through on a successful fetch and always read on a network miss.
+
+### Cache and atomic writes
+
+Cache writes go through `<sha>.toml.tmp` followed by `MoveFileExA(MOVEFILE_REPLACE_EXISTING)`, so a writer crash, power loss, or concurrent reads from multiple Steam-instance processes never expose a partially written file. Surviving `.tmp` files from a crashed writer get swept on the next successful fetch into the same directory.
+
+### Fallback and graceful degradation
+
+The hook installer macros call `ByteSearch(module, "FunctionName")`, which consults the in-memory pattern map, verifies the bytes at `module_base + entry.rva` match the TOML's sig, and returns the address. Out-of-range rva values, sig mismatches, or missing names log a warning and `RecordMissed` into `status.json`; the hook is silently skipped and Steam runs that function unmodified. A missing TOML for one DLL never blocks hook installs in the other DLL, so a partial pattern set still produces a partially-functional LumaCore install instead of aborting.
+
+There are no compiled-in `*Sigs[]` arrays anymore. The runtime pattern map is the single source of truth; the legacy `hooks/PatternDb.h` header is gone.
+
+### Pattern refresh and the analyzer
+
+`cleintcheck/steamclient_analyzer.py` is the maintainer-side tool that produces `<sha>.toml` files for the runtime fetcher.
+
+```
+cd cleintcheck
+python steamclient_analyzer.py "C:\Program Files (x86)\Steam\steamclient64.dll" \
+       --steamui "C:\Program Files (x86)\Steam\steamui.dll" \
+       --emit toml --out-dir PatternsUpdate
+```
+
+The script computes the SHA-256 of each DLL, locates every target function via a hybrid of string-XRef and byte-pattern matching, and writes `PatternsUpdate/steamclient/<sha>.toml` and `PatternsUpdate/steamui/<sha>.toml` ready for upload to the pattern repo.
+
+By default the script also fetches the canonical pattern publisher's TOML for the same SHA from `OpenSteam001/steam-monitor`'s `pattern` branch (with jsDelivr as a transport fallback) and lets the canonical entries win on shared names. Analyzer-only entries — `RequiresLegacyCDKey` and the DLC / cloud / subscription helpers that LumaCore tracks but the canonical doesn't ship — ride along on top, so a single output file covers everything LumaCore expects. Pass `--no-canonical-overlay` to skip the merge, or `--canonical-overlay-url URL` (repeatable) to point at a different mirror.
+
+The runtime fetcher's own logs (`<Steam>\lumacore\misc.log`) note every overlay, cache, and network step so it's straightforward to triage a build that doesn't resolve cleanly.
 
 ---
 
@@ -60,7 +102,7 @@ Steam uses an internal IPC bus to route messages between its client service and 
 
 All other messages pass through unmodified.
 
-Both `GetPipeClient` and `IPCProcessMessage` are resolved via byte-pattern scanning only.  String cross-reference was previously attempted but reverted because the referenced strings can resolve to helper functions at early startup, producing a null pipe pointer and crashing Steam on the first IPC Handshake.
+Both `GetPipeClient` and `IPCProcessMessage` resolve through the same runtime pattern map every other hook uses; the address is verified against the TOML's sig at `module_base + rva` before any detour attaches. String cross-reference resolution was previously attempted for these two and reverted because the referenced strings can resolve to helper functions at early startup, producing a null pipe pointer and crashing Steam on the first IPC Handshake. Pattern-only resolution sidesteps that hazard.
 
 ---
 
@@ -132,7 +174,12 @@ Hooks `LoadPackage`, `CheckAppOwnership`, and `SendCallbackToPipe`.
 
 ### LicenseHooks (`hooks/LicenseHooks.cpp`)
 
-Reserved for future license-related hooks.  Currently a no-op placeholder; `Install()` performs no operations.
+Detours `OptedInMask` and `RequiresLegacyCDKey` against `steamclient64.dll`.
+
+- **`OptedInMask`** — when the OnlineFix CGameID rewrite is in flight, the controller layer asks for appid 480 (Spacewar) and gets the empty mask back. The detour swaps the query back to the real appid so controllers stay live under `-onlinefix`.
+- **`RequiresLegacyCDKey`** — Steam asks the wrapper for a CD key on a small set of pre-2010 titles when ownership crosses certain code paths. For Lua-tracked appids the user has no real key, so the detour answers `false` and the prompt never fires. Without this hook those games refuse to launch.
+
+DLC ownership / install / cloud / license-update / subscribed-app / ownership-ticket queries (`BIsDlcEnabled`, `IsAppDlcInstalled`, `IsCloudEnabledForApp`, `BUpdateLicenses`, `GetSubscribedApps`, `BUpdateAppOwnershipTicket`) are intentionally not detoured here. Steam already returns the right answer for Lua-tracked appids through the existing `CheckAppOwnership` patch, so detouring those is redundant and risks stack corruption on x64 fastcall when an argument count or type is even slightly off. The patterns for those six still ride in the per-build TOML, so future code that needs their addresses can resolve them without changing the publisher or the cache layout.
 
 ---
 
@@ -158,7 +205,7 @@ When an online-fix game is running, Steam's presence broadcasts the SpaceWar app
 
 Implements the string cross-reference search used by the `_STR_D` hook macros.  Scans the `.rdata` section of a module for a target string, finds all code locations that reference it via RIP-relative `LEA`/`MOV` instructions, locates the enclosing function via `.pdata` RUNTIME_FUNCTION lookup, and returns the function entry point.
 
-This is more update-proof for functions called only at game-launch time.  It is intentionally **not** used for hooks that fire during early Steam startup (e.g. `IPCBus`) — those use pure byte patterns to avoid the risk of the string residing in a helper function and resolving to the wrong address.
+This is more update-proof for functions called only at game-launch time.  It is intentionally **not** used for hooks that fire during early Steam startup (e.g. `IPCBus`) — those resolve through the runtime pattern fetcher only, since the rva pin plus byte verification rules out the risk of the string residing in a helper function and resolving to the wrong address.
 
 ---
 
@@ -210,14 +257,18 @@ All other settings use built-in defaults.
 
 ## Pattern maintenance
 
-After a Steam client update, some byte patterns in `hooks/PatternDb.h` may stop matching.  Run the pattern analyzer to check:
+When a Steam client update lands and the new SHA-256 isn't in the pattern repo yet, generate a fresh `<sha>.toml` with the analyzer:
 
 ```
 cd cleintcheck
-python steamclient_analyzer.py
+python steamclient_analyzer.py "C:\Program Files (x86)\Steam\steamclient64.dll" \
+       --steamui "C:\Program Files (x86)\Steam\steamui.dll" \
+       --emit toml --out-dir PatternsUpdate
 ```
 
-The script scans the bundled `steamclient64.dll`, reports which functions were found and which were not, and emits an updated `Patterns_new.h` with refreshed signatures.  Copy the updated entries into `hooks/PatternDb.h` and rebuild.
+Two files land under `PatternsUpdate\steamclient\` and `PatternsUpdate\steamui\` — upload both to the pattern repo, and LumaCore picks them up on the next launch (or immediately if the user drops the files into `<Steam>\lumacore\pattern\` themselves).
+
+See the **Pattern resolution** section above for the full details on the canonical-overlay merge, the FNV-1a section keys, and the source-priority chain.
 
 ---
 
@@ -234,5 +285,11 @@ When enabled, logs are written to `Steam\lumacore\` alongside `LumaCore.dll`.  E
 | `package.log` | PackagePatch / PackageInfo / DirWatch |
 | `capture.log` | SteamCapture / RuntimeCapture VEH events |
 | `packet.log` | PacketRouter — protobuf frame interception |
+| `keyvalue.log` | KVHooks — Install / Uninstall events only (per-call traffic is silent) |
+| `license.log` | LicenseHooks — `OptedInMask` and `RequiresLegacyCDKey` |
+| `misc.log` | Miscellaneous, including the runtime pattern fetcher's overlay / cache / network steps |
+| `status.json` | Single-line snapshot: Steam build id, per-DLL TOML availability, hooks installed / missed |
+
+The `pattern\` subdirectory next to these logs holds the cached `<sha>.toml` files the runtime fetcher uses. Files there are safe to delete; they get re-fetched on next launch.
 
 Log level is controlled by `lumacore.toml` under `[log] level = "debug"` (default: `info`).

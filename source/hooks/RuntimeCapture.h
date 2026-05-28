@@ -35,12 +35,28 @@ namespace SteamCapture {
     // otherwise fall back to GetAppIDForCurrentPipe().
     AppId_t ResolveAppId();
 
+    // Returns the captured OnlineFix real appid (0 when no OnlineFix session
+    // is active). The callback rewrite path keys on the raw value because the
+    // pipe-fallback semantics of ResolveAppId would mask a non-active session.
+    AppId_t OnlineFixRealAppId();
+
     // Scoped real-appid override for IClientUserStats traffic. Increments
     // a thread-local depth counter on active=true and decrements on
     // active=false (underflow guarded). The GetAppIDForCurrentPipe detour
     // returns the real appid only while depth > 0 AND OnlineFix is active
     // AND the original engine call returned the Spacewar masquerade.
     void SetUserStatsContext(bool active);
+
+    // Pipe-scoped fine gate paired with the thread-local depth counter.
+    // EnterStatsScope stamps g_StatsScopePipe with the dispatching pipe on
+    // entry to an IClientUserStats IPC; LeaveStatsScope clears it back to 0
+    // on exit. The achievement-callback rewrite path keys on the stamp so
+    // worker threads sharing an HSteamPipe value cannot bleed rewrites
+    // across pipes that did not originate the user-stats call. StatsScopePipe
+    // returns the current stamp under acquire ordering.
+    void EnterStatsScope(HSteamPipe pipe);
+    void LeaveStatsScope();
+    HSteamPipe StatsScopePipe();
 
     // Get localized game name via GetAppDataFromAppInfo (cached).
     std::string GetGameNameByAppID(AppId_t appId);

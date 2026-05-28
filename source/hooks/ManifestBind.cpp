@@ -1,4 +1,4 @@
-// LumaCore — Steam client hook layer for SteaMidra.
+// LumaCore - Steam client hook layer for SteaMidra.
 // Copyright (c) 2025-2026 Midrag (https://github.com/Midrags).
 // Distributed under the GNU General Public License v3 or later.
 // See <https://www.gnu.org/licenses/> for the full license text.
@@ -9,9 +9,15 @@
 #include <format>
 #include <string>
 
-// ▌▌ LumaCore ▌ MANIFEST ▌ Manifest override hooks
+// ▌▌ LumaCore ▌ MANIFEST ▌ Manifest override hook
 //  BuildDepotDependency patches depot entries' gid/size directly in the
 //  output vector after Steam builds the depot list.
+//
+//  DLC observation hooks (BIsDlcEnabled / IsAppDlcInstalled /
+//  IsCloudEnabledForApp) were intentionally NOT hooked. Steam already
+//  returns the right answer for Lua-tracked appids through the existing
+//  CheckAppOwnership patch, so adding those would be redundant and would
+//  re-introduce wrong-target risk on builds where their TOML rva drifts.
 // ▌▌
 namespace {
 

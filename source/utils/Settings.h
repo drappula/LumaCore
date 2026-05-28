@@ -31,4 +31,10 @@ namespace Settings {
     // [lua]
     inline std::vector<std::string> luaPaths;
 
+    // [pattern_fetch] mirror
+    // Optional URL template for the pattern repo, with {subdir} and {sha}
+    // placeholders. Empty string means "no override; go straight to the
+    // GitHub primary -> jsDelivr -> local cache fallback chain".
+    inline std::string patternMirror;
+
 }

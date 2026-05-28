@@ -8,6 +8,10 @@
 #include <windows.h>
 #include <cstdint>
 #include <vector>
+#include "entry.h"
+#include "hooks/PatternFetcher.h"
+#include "hooks/SigTypes.h"
+#include "hooks/StatusWriter.h"
 #include "hooks/StringFind.h"
 #include "utils/Logger.h"
 
@@ -29,30 +33,34 @@ struct CaptureEntry {
 #define VEH_ZERO_RESOLVE(name)      o##name = nullptr;
 
 // ── ARM_CAPTURE_D ────────────────────────────────────────────────────────────
-// Find signature, save original byte, push to g_captures, arm int3.
-// Requires g_captures (std::vector<CaptureEntry>) in scope.
+// TOML-only resolver. Finds the function via PatternFetcher, saves original
+// byte, pushes to g_captures, arms int3. Requires g_captures
+// (std::vector<CaptureEntry>) in scope.
 #define ARM_CAPTURE_D(name, outVar)                                            \
     do {                                                                        \
-        if (auto* _p_ = FIND_SIG(diversion_hModule, name)) {                   \
-            LOG_DEBUG("Capture: {} armed via byte-pattern @ 0x{:X}", #name, reinterpret_cast<uintptr_t>(_p_)); \
-            o##name = reinterpret_cast<name##_t>(_p_);                         \
+        void* _p_ = PatternFetcher::Resolve(diversion_hModule, #name);          \
+        if (_p_) {                                                              \
+            LOG_DEBUG("Capture: {} armed via TOML @ 0x{:X}", #name,             \
+                      reinterpret_cast<uintptr_t>(_p_));                        \
+            o##name = reinterpret_cast<name##_t>(_p_);                          \
             g_captures.push_back({                                              \
-                reinterpret_cast<void**>(&o##name),                            \
-                reinterpret_cast<void**>(&(outVar)),                           \
-                *reinterpret_cast<uint8_t*>(_p_),                              \
+                reinterpret_cast<void**>(&o##name),                             \
+                reinterpret_cast<void**>(&(outVar)),                            \
+                *reinterpret_cast<uint8_t*>(_p_),                               \
                 #name                                                           \
             });                                                                 \
             VehUtil::ArmInt3(_p_);                                              \
+            StatusWriter::RecordHit(#name);                                     \
         } else {                                                                \
-            LOG_WARN("Capture: {} FAILED — pattern not found", #name);    \
+            LOG_WARN("Capture: {} FAILED - TOML entry missing", #name);         \
+            StatusWriter::RecordMiss(#name);                                    \
         }                                                                       \
     } while (0)
 
 // ── ARM_CAPTURE_STR_D ───────────────────────────────────────────────────────
-// Like ARM_CAPTURE_D but tries string cross-reference first, then falls back
-// to byte pattern. Use when the target function contains a globally unique
-// string literal.
-#define ARM_CAPTURE_STR_D(name, outVar, strSigs, byteSigs)                     \
+// Try string xref first (most update-proof anchor), fall back to PatternFetcher.
+// Use when the target function carries a unique debug string in its body.
+#define ARM_CAPTURE_STR_D(name, outVar, strSigs)                               \
     do {                                                                        \
         void* _p_ = nullptr;                                                    \
         const char* _matched_str_ = nullptr;                                    \
@@ -62,24 +70,30 @@ struct CaptureEntry {
             if (_p_) { _matched_str_ = _s_.str; break; }                       \
         }                                                                       \
         if (_p_) {                                                              \
-            LOG_DEBUG("Capture: {} armed via string-xref \"{}\" @ 0x{:X}", #name, _matched_str_, reinterpret_cast<uintptr_t>(_p_)); \
+            LOG_DEBUG("Capture: {} armed via string-xref \"{}\" @ 0x{:X}",      \
+                      #name, _matched_str_, reinterpret_cast<uintptr_t>(_p_));  \
         } else {                                                                \
-            _p_ = FIND_SIG(diversion_hModule, name);                            \
+            _p_ = PatternFetcher::Resolve(diversion_hModule, #name);            \
             if (_p_) {                                                          \
-                LOG_DEBUG("Capture: {} armed via byte-pattern (str-xref missed) @ 0x{:X}", #name, reinterpret_cast<uintptr_t>(_p_)); \
+                LOG_DEBUG("Capture: {} armed via TOML (str-xref missed) @ 0x{:X}", \
+                          #name, reinterpret_cast<uintptr_t>(_p_));             \
             } else {                                                            \
-                LOG_WARN("Capture: {} FAILED — both string-xref and byte-pattern missed", #name); \
+                LOG_WARN("Capture: {} FAILED - both string-xref and TOML missed", \
+                         #name);                                                \
             }                                                                   \
         }                                                                       \
         if (_p_) {                                                              \
-            o##name = reinterpret_cast<name##_t>(_p_);                         \
+            o##name = reinterpret_cast<name##_t>(_p_);                          \
             g_captures.push_back({                                              \
-                reinterpret_cast<void**>(&o##name),                            \
-                reinterpret_cast<void**>(&(outVar)),                           \
-                *reinterpret_cast<uint8_t*>(_p_),                              \
+                reinterpret_cast<void**>(&o##name),                             \
+                reinterpret_cast<void**>(&(outVar)),                            \
+                *reinterpret_cast<uint8_t*>(_p_),                               \
                 #name                                                           \
             });                                                                 \
             VehUtil::ArmInt3(_p_);                                              \
+            StatusWriter::RecordHit(#name);                                     \
+        } else {                                                                \
+            StatusWriter::RecordMiss(#name);                                    \
         }                                                                       \
     } while (0)
 

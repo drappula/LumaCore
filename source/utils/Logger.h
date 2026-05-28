@@ -118,3 +118,14 @@ namespace Logger {
 #define LOG_MISC_INFO(...)  LOG_MISCCH_INFO(__VA_ARGS__)
 #define LOG_MISC_WARN(...)  LOG_MISCCH_WARN(__VA_ARGS__)
 #define LOG_MISC_ERROR(...) LOG_MISCCH_ERROR(__VA_ARGS__)
+
+// LuaLoader logs already route through the package channel via the
+// LOG_PACKAGE_* aliases above. The LOG_LUA_* group exists so the Lua
+// uint64 parse guard at LuaBindings.cpp / LuaQuery.cpp can call out the
+// binding context without inventing a new channel and forcing a CMake
+// regen of the per-module macro header.
+#define LOG_LUA_TRACE(...) LOG_PKGCH_TRACE(__VA_ARGS__)
+#define LOG_LUA_DEBUG(...) LOG_PKGCH_DEBUG(__VA_ARGS__)
+#define LOG_LUA_INFO(...)  LOG_PKGCH_INFO(__VA_ARGS__)
+#define LOG_LUA_WARN(...)  LOG_PKGCH_WARN(__VA_ARGS__)
+#define LOG_LUA_ERROR(...) LOG_PKGCH_ERROR(__VA_ARGS__)

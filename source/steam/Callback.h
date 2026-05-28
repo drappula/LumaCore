@@ -68,3 +68,40 @@ struct UserStatsReceived_t
 {
 	static constexpr int k_iCallback = 1102;
 };
+
+//-----------------------------------------------------------------------------
+// Purpose: Result of StoreStats (callback id 1101). Layout starts with a
+//          uint64 m_nGameID; the OnlineFix dual-dispatch path rewrites the
+//          low 24 bits from the real appid back to 480 so the game's
+//          appid-480 callback registration sees the storage result.
+//-----------------------------------------------------------------------------
+struct UserStatsStored_t
+{
+	static constexpr int k_iCallback = 1101;
+};
+
+//-----------------------------------------------------------------------------
+// Purpose: Achievement icon fetched (callback id 1109). m_nGameID at offset 0
+//          carries the appid in the low 24 bits, same shape as the other
+//          three user-stats callbacks the OnlineFix dual-dispatch path
+//          rewrites.
+//-----------------------------------------------------------------------------
+struct UserAchievementIconFetched_t
+{
+	static constexpr int k_iCallback = 1109;
+};
+
+//-----------------------------------------------------------------------------
+// GetAPICallResult callback ids the OnlineFix achievement rewrite path
+// dispatches against. Layout matches the SDK contract (m_nGameID at offset 0,
+// low 24 bits = appid).
+//-----------------------------------------------------------------------------
+struct GlobalAchievementPercentagesReady_t
+{
+	static constexpr int k_iCallback = 1110;
+};
+
+struct GlobalStatsReceived_t
+{
+	static constexpr int k_iCallback = 1112;
+};

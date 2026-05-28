@@ -8,6 +8,7 @@
 #include "IPCBus.h"
 #include "KeyValues.h"
 #include "ManifestBind.h"
+#include "PatternFetcher.h"
 #include "SteamCapture.h"
 #include "SteamUI.h"
 #include "PacketRouter.h"
@@ -46,5 +47,7 @@ namespace LumaCore {
         PacketRouter::Uninstall();
         PackagePatch::Uninstall();
         LicenseHooks::Uninstall();
+        // Drop the runtime pattern map last; nothing else looks it up here.
+        PatternFetcher::Reset();
     }
 }

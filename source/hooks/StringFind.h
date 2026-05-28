@@ -7,15 +7,7 @@
 
 #include <windows.h>
 
-// Describes one string cross-reference search target.
-// Steam functions often reference unique string literals (error messages, names)
-// that stay stable across builds even when the surrounding byte pattern changes.
-// Use this to locate a function by the string it references rather than its bytes.
-struct StringXRefSig {
-    const char* label;     // identifier for logging, e.g. "1778803745" or "v1"
-    const char* str;       // the exact null-terminated string the target function contains a LEA to
-    int         occurrence; // 1-based: if multiple functions reference the same string, pick the Nth one
-};
+#include "SigTypes.h"
 
 namespace StringFind {
     // Finds a function by tracing which code references a known string literal.
