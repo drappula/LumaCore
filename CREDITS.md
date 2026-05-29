@@ -6,8 +6,9 @@ LumaCore was written by Midrag for the SteaMidra project.
 
 ### Acknowledgements
 
-**OpenSteamTool** (https://github.com/OpenSteam001/OpenSteamTool) — GPL-3.0 license — served as
-an inspiration during the early design phase of LumaCore.
+**OpenSteamTool** (https://github.com/OpenSteam001/OpenSteamTool) — GPL-3.0 license — was an
+early inspiration and reference for LumaCore. The current code has since been rewritten and
+extended with significant new work by Midrag.
 
 ### Third-party libraries
 

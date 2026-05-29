@@ -124,13 +124,56 @@ namespace LuaLoader::Internal {
             }
             return 1;
         }
+
+        // Stdlib sandbox. We deliberately do NOT call luaL_openlibs because
+        // it pulls in io, os, package, debug, coroutine — every one of those
+        // gives a hostile .lua file a way to read/write files, shell out, or
+        // load arbitrary bytecode. Plugin scripts only need pure-data
+        // primitives so we open exactly four libs by hand.
+        struct StdLib {
+            const char*  name;
+            lua_CFunction loader;
+        };
+        constexpr StdLib kAllowedStdLibs[] = {
+            {"_G",            luaopen_base},
+            {LUA_TABLIBNAME,  luaopen_table},
+            {LUA_STRLIBNAME,  luaopen_string},
+            {LUA_MATHLIBNAME, luaopen_math},
+        };
+
+        // After luaopen_base runs the base lib still hands us dofile,
+        // loadfile, load, loadstring, require. Any one of those lets a
+        // plugin pull external code into the VM so wipe them. collectgarbage
+        // gets nuked too because a malicious script can pause the GC and
+        // starve Steam's process. Everything else (pairs, ipairs, pcall,
+        // tostring, type, error, assert) stays because legitimate .lua
+        // files use them.
+        constexpr const char* kStripFromBase[] = {
+            "dofile",
+            "loadfile",
+            "load",
+            "loadstring",
+            "require",
+            "collectgarbage",
+        };
     }
 
     bool Initialize() {
         if (g_lua_state) return true;
         g_lua_state = luaL_newstate();
         if (!g_lua_state) return false;
-        luaL_openlibs(g_lua_state);
+
+        // Whitelist load instead of luaL_openlibs.
+        for (const auto& lib : kAllowedStdLibs) {
+            luaL_requiref(g_lua_state, lib.name, lib.loader, 1);
+            lua_pop(g_lua_state, 1);
+        }
+
+        // Strip code-loading and GC-control hooks from the base lib.
+        for (const char* victim : kStripFromBase) {
+            lua_pushnil(g_lua_state);
+            lua_setglobal(g_lua_state, victim);
+        }
 
         // Register every binding under its canonical lowercase name AND
         // remember it for the case-folded resolver below.
