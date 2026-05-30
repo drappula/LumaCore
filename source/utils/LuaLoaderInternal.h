@@ -38,6 +38,9 @@ namespace LuaLoader::Internal {
     extern std::unordered_map<uint64_t, ManifestOverride> ManifestOverrides;
     extern std::unordered_map<AppId_t, uint64_t>    StatSteamIdSet;
     extern std::unordered_set<AppId_t>              OwnedAppIdSet;
+    // Per-app .lua mtime stamp, populated when ParseFile runs successfully.
+    // Keyed by appid (whatever the .lua's stem encodes); seconds since epoch.
+    extern std::unordered_map<AppId_t, int64_t>     LuaMtimeMap;
 
     // ── Per-file parse session ────────────────────────────────────────────
     // ParseFile populates `currentFile`, every successful binding pushes
@@ -78,6 +81,7 @@ namespace LuaLoader::Internal {
     int Bind_setAppticket(lua_State* L);
     int Bind_setEticket(lua_State* L);
     int Bind_setStat(lua_State* L);
+    int Bind_lcHttpGet(lua_State* L);
 
     // ── Typed argument validator ─────────────────────────────────────────
     // Returns the argument as a typed value when the position holds the

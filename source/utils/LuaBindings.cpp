@@ -16,6 +16,7 @@
 #include "LuaLoaderInternal.h"
 #include "Logger.h"
 #include "Ticket.h"
+#include "RuntimeHttp.h"
 
 #include <lua.hpp>
 #include <algorithm>
@@ -256,5 +257,27 @@ namespace LuaLoader::Internal {
 
         StatSteamIdSet[appId] = parsedSid;
         return 0;
+    }
+
+    // ── lcHttpGet(url) -> body, status ───────────────────────────────────
+    // Plugin-side runtime HTTP GET. The 00_LetUpdate_override and any
+    // future user-supplied .lua that wants to fetch a manifest GID
+    // off a clearnet host can call this without going back through the
+    // SteaMidra GUI. Body cap is 8 MiB and the total budget is 12s; both
+    // are enforced inside RuntimeHttp::Get. On a network error the body
+    // returned is the empty string and status is 0.
+    int Bind_lcHttpGet(lua_State* L) {
+        if (lua_gettop(L) < 1) {
+            return luaL_error(L, "lcHttpGet: need url string");
+        }
+        std::string_view url = CheckString(L, 1, "lcHttpGet");
+        const auto resp = RuntimeHttp::Get(url);
+        if (resp.networkError) {
+            LOG_LUA_DEBUG("lcHttpGet: net error '{}' for url='{}'",
+                          resp.diagnostic, TruncForLog(url));
+        }
+        lua_pushlstring(L, resp.body.data(), resp.body.size());
+        lua_pushinteger(L, static_cast<lua_Integer>(resp.status));
+        return 2;
     }
 }

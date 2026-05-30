@@ -74,13 +74,47 @@ namespace Settings {
             if (auto patternTbl = tbl["pattern_fetch"].as_table()) {
                 if (auto m = (*patternTbl)["mirror"].value<std::string>())
                     patternMirror = *m;
+                if (auto g = (*patternTbl)["gitflic_enabled"].value<bool>())
+                    patternGitflicEnabled = *g;
             }
 
+            // [manifest_fetch]
+            // - urls = [...] takes priority and replaces the default chain
+            // - url = "..." overrides the chain with a single endpoint
+            //   (back-compat with the 6.2.x single-URL config)
+            // - neither = the 3-default chain in Settings.h stays
+            if (auto mfetch = tbl["manifest_fetch"].as_table()) {
+                if (auto arr = (*mfetch)["urls"].as_array()) {
+                    std::vector<std::string> chain;
+                    chain.reserve(arr->size());
+                    for (const auto& elem : *arr) {
+                        if (auto s = elem.value<std::string>())
+                            chain.push_back(*s);
+                    }
+                    if (!chain.empty())
+                        manifestFetchUrls = std::move(chain);
+                } else if (auto u = (*mfetch)["url"].value<std::string>()) {
+                    manifestFetchUrls = { *u };
+                }
+                if (auto t = (*mfetch)["timeout_sec"].value<int64_t>())
+                    manifestFetchTimeoutSec = static_cast<int>(*t);
+            }
+
+            std::string urlsLog;
+            for (const auto& u : manifestFetchUrls) {
+                if (!urlsLog.empty()) urlsLog += " | ";
+                urlsLog += u;
+            }
+            if (urlsLog.empty()) urlsLog = "<disabled>";
+
             LOG_INFO("Settings: log.level={} log.verbose={} lua.paths_count={} "
-                     "pattern_fetch.mirror={}",
+                     "pattern_fetch.mirror={} manifest_fetch.urls=[{}] "
+                     "manifest_fetch.timeout_sec={}",
                      LevelName(logLevel), verbose ? "true" : "false",
                      static_cast<uint32_t>(luaPaths.size()),
-                     patternMirror.empty() ? "<none>" : patternMirror);
+                     patternMirror.empty() ? "<none>" : patternMirror,
+                     urlsLog,
+                     manifestFetchTimeoutSec);
 
         } catch (const toml::parse_error& e) {
             LOG_WARN("Settings: TOML parse error: {}", e.what());

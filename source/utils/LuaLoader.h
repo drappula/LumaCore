@@ -13,6 +13,7 @@
 
 namespace LuaLoader {
     bool HasDepot(AppId_t appId);
+    bool IsOwned(AppId_t appId);
     void MarkOwned(AppId_t appId);
     std::vector<AppId_t> GetAllDepotIds();
     std::vector<uint8> GetDecryptionKey(AppId_t appId);
@@ -23,6 +24,13 @@ namespace LuaLoader {
     // Otherwise returns the built-in pool. PacketRouter tries each in order.
     const uint64_t* GetStatSteamIdPool(AppId_t appId, size_t& outCount);
     bool pinApp(AppId_t appId);
+
+    // .lua mtime indexed per appid so the host can feed Steam's "added"
+    // timestamp from when the user dropped the .lua file in. The library
+    // "Date Added" sort wants seconds since epoch as int64 RTC time. Zero
+    // when the appid wasn't registered through ParseFile (legacy entries
+    // captured by addappid in the same process before ParseFile ran).
+    int64_t GetLuaMtime(AppId_t appId);
 
     struct ManifestOverride {
           uint64_t gid;

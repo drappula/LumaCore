@@ -10,6 +10,7 @@
 #include "entry.h"
 #include "utils/Ticket.h"
 #include "utils/Hash.h"
+#include "utils/ManifestFetch.h"
 #include <mutex>
 #include <unordered_map>
 
@@ -139,6 +140,7 @@ namespace {
     // ── Hash constants for target_job_name dispatch ─────────────
     constexpr uint32 HASH_JOB_NotifyRunningApps      = LcFnvHash("FamilyGroupsClient.NotifyRunningApps#1");
     constexpr uint32 HASH_JOB_GetUserStats            = LcFnvHash("Player.GetUserStats#1");
+    constexpr uint32 HASH_JOB_GetManifestRequestCode  = LcFnvHash("ContentServerDirectory.GetManifestRequestCode#1");
 } // anonymous namespace
 
 
@@ -759,6 +761,114 @@ namespace OnlineFix {
 } // namespace OnlineFix
 
 
+// ▌▌ LumaCore ▌ WIRE ▌ DepotFallback
+//  Outgoing: ContentServerDirectory.GetManifestRequestCode#1  (eMsg 151)
+//  Incoming: ContentServerDirectory.GetManifestRequestCode#1  (eMsg 147)
+//
+//  When Steam asks the content directory for a request code on a depot
+//  we faked ownership of, the server hands back eresult=2 / cbBody=0
+//  and the download UI screams "NO INTERNET CONNECTION". The send
+//  handler kicks off an async HTTP fetch; the recv handler waits up
+//  to manifest_fetch.timeout_sec for the future to land, then rewrites
+//  the header eresult to OK and stuffs the request code into the body.
+//  On timeout/failure the original frame just passes through, so a
+//  legitimately-owned depot or a busted mirror never makes things
+//  worse than they already were.
+// ▌▌
+namespace DepotFallback {
+
+    bool HandleSend(const uint8* pBody, uint32 cbBody,
+                    const uint8* pHdr, uint32 cbHdr)
+    {
+        CContentServerDirectory_GetManifestRequestCode_Request req;
+        if (!req.ParseFromArray(pBody, cbBody)) {
+            LOG_MANIFESTCH_WARN("GetManifestRequestCode send: parse failed (cbBody={})", cbBody);
+            return false;
+        }
+        if (!req.has_depot_id() || !req.has_manifest_id()) {
+            LOG_MANIFESTCH_DEBUG("GetManifestRequestCode send: depot/manifest missing, skip");
+            return false;
+        }
+        const AppId_t depotId = req.depot_id();
+        const uint64_t gid    = req.manifest_id();
+        const AppId_t appId   = req.has_app_id() ? req.app_id() : 0;
+
+        // Only intercept depots LumaCore is actively faking. Real-owned
+        // depots use the same target_job_name and we want their requests
+        // to fly straight through.
+        if (!LuaLoader::HasDepot(depotId)) {
+            LOG_MANIFESTCH_DEBUG("GetManifestRequestCode send: depot={} gid={} not in addappid, skip",
+                                 depotId, gid);
+            return false;
+        }
+
+        CMsgProtoBufHeader hdr;
+        if (!hdr.ParseFromArray(pHdr, cbHdr) || !hdr.has_jobid_source()) {
+            LOG_MANIFESTCH_WARN("GetManifestRequestCode send: missing jobid_source, skip");
+            return false;
+        }
+        const uint64 jobId = hdr.jobid_source();
+
+        LOG_MANIFESTCH_INFO("GetManifestRequestCode send: depot={} gid={} app={} jobid={}",
+                            depotId, gid, appId, jobId);
+        ManifestFetch::Submit(jobId, gid, appId, depotId);
+        // Don't rewrite the outgoing frame; the body Steam built is fine
+        // as a placeholder, and we always intercept the response.
+        return false;
+    }
+
+    void HandleRecv(const uint8* pHdr, uint32 cbHdr,
+                    const uint8* pBody, uint32 cbBody)
+    {
+        CMsgProtoBufHeader hdr;
+        if (!hdr.ParseFromArray(pHdr, cbHdr)) {
+            LOG_MANIFESTCH_WARN("GetManifestRequestCode recv: header parse failed");
+            return;
+        }
+        if (!hdr.has_jobid_target()) {
+            LOG_MANIFESTCH_DEBUG("GetManifestRequestCode recv: no jobid_target");
+            return;
+        }
+        const uint64 jobId = hdr.jobid_target();
+
+        auto resolved = ManifestFetch::Resolve(jobId);
+        if (!resolved) {
+            // Either no Submit ever ran for this jobid (depot wasn't ours)
+            // or the HTTP fetch failed/timed out. Let the original frame
+            // pass through — Steam falls back to its own retry path.
+            LOG_MANIFESTCH_DEBUG("GetManifestRequestCode recv: jobid={} no patch (cbBody={} hdr.eresult={})",
+                                 jobId, cbBody, hdr.eresult());
+            return;
+        }
+
+        // Rewrite the header so the eresult flips to OK.
+        hdr.set_eresult(static_cast<int32_t>(k_EResultOK));
+        const size_t hdrSize = hdr.ByteSizeLong();
+        if (hdrSize > kMaxHdrSize || !hdr.SerializeToArray(g_RxHdr, kMaxHdrSize)) {
+            LOG_MANIFESTCH_WARN("GetManifestRequestCode recv: header re-serialise failed (size={})", hdrSize);
+            return;
+        }
+        g_RxHdrLen = static_cast<uint32>(hdrSize);
+
+        // Build the body carrying the request code.
+        CContentServerDirectory_GetManifestRequestCode_Response resp;
+        resp.set_manifest_request_code(*resolved);
+        const size_t bodySize = resp.ByteSizeLong();
+        if (bodySize > kMaxBodySize || !resp.SerializeToArray(g_RxBody, kMaxBodySize)) {
+            LOG_MANIFESTCH_WARN("GetManifestRequestCode recv: body re-serialise failed (size={})", bodySize);
+            return;
+        }
+        g_RxBodyLen = static_cast<uint32>(bodySize);
+
+        g_PatchRxHdr = true;
+        g_PatchRx    = true;
+        LOG_MANIFESTCH_INFO("GetManifestRequestCode recv: jobid={} injected code={} (orig cbBody={})",
+                            jobId, *resolved, cbBody);
+    }
+
+} // namespace DepotFallback
+
+
 // ▌▌ LumaCore ▌ WIRE ▌ Dispatch
 // ▌▌
 namespace {
@@ -772,6 +882,9 @@ namespace {
 
         case HASH_JOB_GetUserStats:
             return UserStats::HandleSend_GetUserStats(pBody, cbBody, pHdr, cbHdr);
+
+        case HASH_JOB_GetManifestRequestCode:
+            return DepotFallback::HandleSend(pBody, cbBody, pHdr, cbHdr);
 
         // ---- add new 151 service methods here ----
         }
@@ -835,6 +948,10 @@ namespace {
 
         case HASH_JOB_GetUserStats:
             UserStats::HandleRecv_GetUserStatsResponse(pHdr, cbHdr, pBody, cbBody);
+            return;
+
+        case HASH_JOB_GetManifestRequestCode:
+            DepotFallback::HandleRecv(pHdr, cbHdr, pBody, cbBody);
             return;
 
         // ---- add new 147 service methods here ----

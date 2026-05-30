@@ -82,6 +82,8 @@ add_library(LumaCore SHARED
     utils/LuaState.cpp
     utils/LuaBindings.cpp
     utils/LuaQuery.cpp
+    utils/RuntimeHttp.cpp
+    utils/ManifestFetch.cpp
     utils/VehUtil.cpp
     utils/DirWatch.cpp
     utils/Diagnostics.cpp

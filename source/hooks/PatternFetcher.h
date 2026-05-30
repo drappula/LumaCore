@@ -53,6 +53,7 @@ namespace PatternFetcher {
         UserMirror,
         Github,
         Cdn,
+        Gitflic,
         Cache,
     };
 

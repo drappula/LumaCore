@@ -84,6 +84,17 @@ namespace {
         LOG_PACKAGE_DEBUG("LoadPackage: PackageId={} AppIdVec.m_Size={}", pInfo->PackageId, pInfo->AppIdVec.m_Size);
 
         if (pInfo->PackageId == 0) {
+            // PR-style guard: skip injection unless Steam reports the
+            // package usable. injecting into a non-Available package gets
+            // the vector clobbered when Steam re-loads it, and we lose
+            // every fake appid. better to bail and let the post-login
+            // re-injection from RuntimeCapture pick it up cleanly.
+            if (pInfo->Status != EPackageStatus::Available) {
+                LOG_PACKAGE_WARN("LoadPackage(PackageId=0): status={} not Available; deferring injection",
+                                  static_cast<int>(pInfo->Status));
+                g_pPackage0 = pInfo;
+                return result;
+            }
             // Save the pointer for later use by startup injection
             g_pPackage0 = pInfo;
 

@@ -36,6 +36,11 @@ The build script downloads all dependencies (Lua 5.4, Microsoft Detours, spdlog,
 
 See [CREDITS.md](CREDITS.md).
 
+Related projects on GitHub:
+
+- [KoriaPolis/Steam-Auto-PT](https://github.com/KoriaPolis/Steam-Auto-PT)
+- [KoriaPolis/LumaCore](https://github.com/KoriaPolis/LumaCore)
+
 ## License
 
 LumaCore is part of SteaMidra and is distributed under the GNU General Public License v3.  See the root `LICENSE` file for the full text.

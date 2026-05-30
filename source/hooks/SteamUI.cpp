@@ -9,6 +9,7 @@
 #include "SigTypes.h"
 #include "utils/ByteScan.h"
 #include "utils/HookStatus.h"
+#include "utils/LuaLoader.h"
 #include "steam_messages.pb.h"
 
 #include <psapi.h>
@@ -228,6 +229,17 @@ namespace SteamUI {
     void RemoveAppOverview(AppId_t appId) {
         if (!oAddProtobufAsBinary || !oGetTopManager || !oGetAppByID) {
             LOG_STEAMUICH_WARN("RemoveAppOverview: primitives unresolved; appId={}", appId);
+            return;
+        }
+
+        // Skip eviction for genuinely owned apps. CheckAppOwnership has
+        // already marked them via MarkOwned and the dual-account refresh
+        // path was tearing them out of the library card view because
+        // every appid in the package vector got the eviction treatment.
+        // This keeps the legitimate library entry alive while still
+        // dropping the fake-owned cards on hot-reload.
+        if (LuaLoader::IsOwned(appId)) {
+            LOG_STEAMUICH_DEBUG("RemoveAppOverview: appId={} is owned; skipping eviction", appId);
             return;
         }
 

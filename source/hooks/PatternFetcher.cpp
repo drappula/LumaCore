@@ -49,6 +49,18 @@ namespace PatternFetcher {
         constexpr const char* kPrimaryPathPrefix = "/KoriaPolis/Steam-Auto-PT/pattern/";
         constexpr const char* kCdnPathPrefix     = "/gh/KoriaPolis/Steam-Auto-PT@pattern/";
 
+        // gitflic mirror lives at midrags/steam-auto-pt on the pattern branch.
+        // Per-file raw fetches are gated behind login on gitflic, so we go
+        // through the public blob-info JSON API instead. The reply carries
+        // the file body in a "blobLines" array — each line is one element
+        // with a "body" field. Stitch them with '\n' to rebuild the TOML.
+        // Tested URL form: /api/project/<owner>/<repo>/blob?file=<path>&branch=<branch>
+        // The response is JSON with a top-level "blobLines": [{"body": ...}, ...].
+        // No auth needed for public projects, ddos-guard cookies handled
+        // automatically by WinHTTP because we don't keep a session.
+        constexpr const char* kGitflicHost = "gitflic.ru";
+        constexpr const char* kGitflicApiPrefix = "/api/project/midrags/steam-auto-pt/blob?branch=pattern&file=";
+
         // entries[subdir][name] -> Entry. The subdir key is a stable string view
         // into a small pool of "steamclient" / "steamui" literals, so we can
         // key the outer map by std::string without allocating per lookup.
@@ -179,13 +191,30 @@ namespace PatternFetcher {
 
             std::size_t colon = hostPort.find(':');
             if (colon != std::string::npos) {
+                // Port substring guard. stoi() throws on empty / non-numeric
+                // and on values that don't fit a long. A pattern-repo host
+                // with a malformed port (truncated mirror config, paste
+                // accident, whatever) used to crash the worker thread because
+                // the previous catch(...) was swallowing too much and the
+                // INTERNET_PORT cast happened anyway in some clang builds.
+                // Now: explicit invalid_argument / out_of_range catches plus
+                // a manual 1..65535 fence. On any failure: drop the URL and
+                // let the next fallback in the chain run.
                 std::string portStr = hostPort.substr(colon + 1);
                 hostPort.resize(colon);
+                if (portStr.empty()) return false;
+                long parsed = 0;
                 try {
-                    int p = std::stoi(portStr);
-                    if (p < 1 || p > 65535) return false;
-                    out.port = static_cast<INTERNET_PORT>(p);
-                } catch (...) { return false; }
+                    std::size_t consumed = 0;
+                    parsed = std::stol(portStr, &consumed, 10);
+                    if (consumed != portStr.size()) return false;
+                } catch (const std::invalid_argument&) {
+                    return false;
+                } catch (const std::out_of_range&) {
+                    return false;
+                }
+                if (parsed < 1 || parsed > 65535) return false;
+                out.port = static_cast<INTERNET_PORT>(parsed);
             }
             if (hostPort.empty()) return false;
             out.host = Utf8ToWide(hostPort);
@@ -508,6 +537,83 @@ namespace PatternFetcher {
             return out;
         }
 
+        std::string BuildGitflicUrl(const char* subdir, const std::string& sha) {
+            // gitflic wants the file path URL-encoded but their API tolerates
+            // the bare slash — kept literal because every other character in
+            // the file path is hex (lower a-f, 0-9). Saves a percent-encoder.
+            std::string out = "https://";
+            out += kGitflicHost;
+            out += kGitflicApiPrefix;
+            out += subdir;
+            out += '/';
+            out += sha;
+            out += ".toml";
+            return out;
+        }
+
+        // Glue the gitflic blobLines JSON back into the original file body.
+        // The shape is a top-level JSON object with a "blobLines" array,
+        // each element an object with a "body" string. Concatenate body
+        // values with '\n' to reconstruct what the raw file looked like.
+        // No real JSON parser; the response is simple enough that a manual
+        // walk is faster and avoids dragging another dep into LumaCore.
+        // Returns empty string on any structural surprise so the caller
+        // demotes the gitflic leg without leaking malformed text into
+        // ParseToml.
+        std::string StitchGitflicBlobLines(std::string_view body) {
+            constexpr std::string_view kKey = "\"blobLines\"";
+            size_t k = body.find(kKey);
+            if (k == std::string_view::npos) return {};
+            size_t arrStart = body.find('[', k);
+            if (arrStart == std::string_view::npos) return {};
+            // walk array elements, pulling each object's "body" value
+            std::string out;
+            out.reserve(body.size() / 2);
+            size_t pos = arrStart + 1;
+            const std::string_view bodyKey = "\"body\"";
+            while (pos < body.size()) {
+                size_t bk = body.find(bodyKey, pos);
+                if (bk == std::string_view::npos) break;
+                // find the closing ] of the array; if bk is past it, stop
+                size_t arrEnd = body.find(']', pos);
+                if (arrEnd != std::string_view::npos && bk > arrEnd) break;
+                size_t colon = body.find(':', bk + bodyKey.size());
+                if (colon == std::string_view::npos) break;
+                size_t q1 = body.find('"', colon);
+                if (q1 == std::string_view::npos) break;
+                // walk through the JSON-encoded string, honouring \" escapes
+                std::string line;
+                line.reserve(64);
+                bool escaped = false;
+                size_t p = q1 + 1;
+                for (; p < body.size(); ++p) {
+                    char c = body[p];
+                    if (escaped) {
+                        switch (c) {
+                            case 'n': line.push_back('\n'); break;
+                            case 't': line.push_back('\t'); break;
+                            case 'r': line.push_back('\r'); break;
+                            case '"': line.push_back('"');  break;
+                            case '\\': line.push_back('\\'); break;
+                            case '/': line.push_back('/');  break;
+                            default:  line.push_back(c);    break;
+                        }
+                        escaped = false;
+                        continue;
+                    }
+                    if (c == '\\') { escaped = true; continue; }
+                    if (c == '"') break;
+                    line.push_back(c);
+                }
+                if (p >= body.size()) break;
+                if (!out.empty()) out.push_back('\n');
+                out.append(line);
+                pos = p + 1;
+                if (out.size() > kMaxBodyBytes) break;
+            }
+            return out;
+        }
+
         // Substitute {subdir} and {sha} placeholders in a user-mirror template.
         std::string ApplyMirrorTemplate(std::string_view tmpl,
                                         const char* subdir,
@@ -576,6 +682,7 @@ namespace PatternFetcher {
             case Source::UserMirror: return "user-mirror";
             case Source::Github:     return "github";
             case Source::Cdn:        return "cdn";
+            case Source::Gitflic:    return "gitflic";
             case Source::Cache:      return "cache";
         }
         return "?";
@@ -786,6 +893,38 @@ namespace PatternFetcher {
                     }
                     LOG_MISC_DEBUG("PatternFetcher: cdn parse failed for {} ({})",
                                    subdir, perr);
+                }
+            }
+
+            // ── Step 3: gitflic.ru fallback for blocked regions ──────────────
+            // Hits the public blob-info JSON API and stitches blobLines back
+            // into a TOML body before parsing. Skipped when github primary
+            // returned 404 (means the file genuinely doesn't exist yet, not
+            // a network issue) and when the user explicitly disables it.
+            if (!primary404 && Settings::patternGitflicEnabled) {
+                std::string url = BuildGitflicUrl(subdir, sha);
+                HttpResult h = HttpGet(url);
+                if (h.status == 200 && !h.bodyTooLarge && !h.netError && !h.body.empty()) {
+                    std::string stitched = StitchGitflicBlobLines(h.body);
+                    if (stitched.empty()) {
+                        LOG_MISC_DEBUG("PatternFetcher: gitflic stitch failed for {} "
+                                       "(body shape changed?)", subdir);
+                    } else {
+                        std::string perr;
+                        EntryMap parsed;
+                        if (ParseToml(stitched, parsed, perr)) {
+                            fetchedBody = std::move(stitched);
+                            map         = std::move(parsed);
+                            sourceOut   = Source::Gitflic;
+                            return true;
+                        }
+                        LOG_MISC_DEBUG("PatternFetcher: gitflic parse failed for {} ({})",
+                                       subdir, perr);
+                    }
+                } else {
+                    LOG_MISC_DEBUG("PatternFetcher: gitflic failed for {} (status={} "
+                                   "neterr={} note='{}')",
+                                   subdir, h.status, h.netError ? 1 : 0, h.note);
                 }
             }
 

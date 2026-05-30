@@ -18,6 +18,7 @@
 #include <lua.hpp>
 #include <algorithm>
 #include <charconv>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -27,6 +28,9 @@
 #include <string_view>
 #include <system_error>
 #include <vector>
+
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
 
 namespace {
     // File-local strict-decimal uint64 parser, re-declared per translation
@@ -60,6 +64,17 @@ namespace LuaLoader {
     bool HasDepot(AppId_t depotId) {
         using namespace Internal;
         return DepotKeySet.count(depotId) && !OwnedAppIdSet.count(depotId);
+    }
+
+    bool IsOwned(AppId_t appId) {
+        using namespace Internal;
+        return OwnedAppIdSet.count(appId) > 0;
+    }
+
+    int64_t GetLuaMtime(AppId_t appId) {
+        using namespace Internal;
+        auto it = LuaMtimeMap.find(appId);
+        return it == LuaMtimeMap.end() ? 0 : it->second;
     }
 
     void MarkOwned(AppId_t appId) {
@@ -177,6 +192,26 @@ namespace LuaLoader {
 
         std::filesystem::path path(filePath);
 
+        // Stamp the .lua's last-write time so the host can tell Steam's
+        // appinfo "added" timestamp where the user dropped the file. Library
+        // sort by Date Added relies on that field; without it Steam picks
+        // the install/launch order which is wrong for fake-owned games.
+        int64_t lua_mtime_secs = 0;
+        {
+            WIN32_FILE_ATTRIBUTE_DATA attr{};
+            if (GetFileAttributesExA(filePath.c_str(), GetFileExInfoStandard, &attr)) {
+                ULARGE_INTEGER ull{};
+                ull.LowPart  = attr.ftLastWriteTime.dwLowDateTime;
+                ull.HighPart = attr.ftLastWriteTime.dwHighDateTime;
+                // FILETIME is 100ns ticks since 1601-01-01. Shift to unix
+                // epoch and convert to seconds.
+                constexpr uint64_t kEpochOffset = 116444736000000000ull;
+                if (ull.QuadPart >= kEpochOffset) {
+                    lua_mtime_secs = static_cast<int64_t>((ull.QuadPart - kEpochOffset) / 10000000ull);
+                }
+            }
+        }
+
         // Auto-register the appid that the filename stem encodes (e.g. a
         // file named "3764200.lua" registers depot 3764200 even if the
         // .lua body only calls addappid() on auxiliary depots). Also
@@ -198,6 +233,9 @@ namespace LuaLoader {
                         DepotKeySet[fileAppId] = "";
                         session.recordDepot(fileAppId);
                         LOG_DEBUG("ParseFile: auto-registered appid={} from filename {}", fileAppId, stem);
+                    }
+                    if (lua_mtime_secs > 0) {
+                        LuaMtimeMap[fileAppId] = lua_mtime_secs;
                     }
                 }
             }

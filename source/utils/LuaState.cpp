@@ -22,6 +22,7 @@
 #include <cstring>
 #include <string>
 #include <unordered_map>
+#include <utility>
 
 namespace LuaLoader::Internal {
 
@@ -34,6 +35,7 @@ namespace LuaLoader::Internal {
     std::unordered_map<uint64_t, ManifestOverride> ManifestOverrides{};
     std::unordered_map<AppId_t, uint64_t>    StatSteamIdSet{};
     std::unordered_set<AppId_t>              OwnedAppIdSet{};
+    std::unordered_map<AppId_t, int64_t>     LuaMtimeMap{};
 
     std::unordered_map<std::string, std::unordered_set<AppId_t>> g_fileDepots;
     std::unordered_map<AppId_t, uint32_t> g_depotRefCount;
@@ -96,6 +98,7 @@ namespace LuaLoader::Internal {
             {"setappticket",  &Bind_setAppticket},
             {"seteticket",    &Bind_setEticket},
             {"setstat",       &Bind_setStat},
+            {"lchttpget",     &Bind_lcHttpGet},
         };
 
         // _G.__index resolver: any global that isn't directly defined gets
@@ -184,6 +187,49 @@ namespace LuaLoader::Internal {
             lua_pushcfunction(g_lua_state, b.fn);
             lua_setglobal(g_lua_state, b.name);
         }
+
+        // Publish an _originals table so user-supplied .lua files can
+        // wrap a binding without losing the C handler. The 00_LetUpdate
+        // override pattern is:
+        //
+        //   local original = _originals.setManifestid
+        //   function setManifestid(d, m, s)
+        //       print(("override: depot=%d gid=%s"):format(d, m))
+        //       return original(d, m, s)
+        //   end
+        //
+        // The user reassigns the global slot, but the C handler stays
+        // reachable through _originals so the override can chain through
+        // it. _originals is populated case-insensitively (both lowercase
+        // canonical AND CamelCase aliases) so the user doesn't have to
+        // care about which casing the binding was registered under.
+        lua_createtable(g_lua_state,
+                        0, static_cast<int>(std::size(kBindings) * 2));
+        for (const auto& b : kBindings) {
+            lua_pushcfunction(g_lua_state, b.fn);
+            lua_setfield(g_lua_state, -2, b.name);
+        }
+        // Camel-style aliases the existing scripts in the wild expect.
+        // Hardcoded set; if we ever rename a binding update both lists.
+        constexpr std::pair<const char*, const char*> kCamelAliases[] = {
+            {"addAppId",      "addappid"},
+            {"addToken",      "addtoken"},
+            {"setManifestid", "setmanifestid"},
+            {"setAppTicket",  "setappticket"},
+            {"setEticket",    "seteticket"},
+            {"setStat",       "setstat"},
+            {"lcHttpGet",     "lchttpget"},
+        };
+        for (const auto& alias : kCamelAliases) {
+            for (const auto& b : kBindings) {
+                if (std::strcmp(b.name, alias.second) == 0) {
+                    lua_pushcfunction(g_lua_state, b.fn);
+                    lua_setfield(g_lua_state, -2, alias.first);
+                    break;
+                }
+            }
+        }
+        lua_setglobal(g_lua_state, "_originals");
 
         // Install the case-folded resolver on _G's metatable as __index.
         // Lua's protocol calls __index whenever a direct global lookup
