@@ -17,6 +17,7 @@
 #include "Logger.h"
 #include "Ticket.h"
 #include "RuntimeHttp.h"
+#include "Settings.h"
 
 #include <lua.hpp>
 #include <algorithm>
@@ -266,11 +267,101 @@ namespace LuaLoader::Internal {
     // SteaMidra GUI. Body cap is 8 MiB and the total budget is 12s; both
     // are enforced inside RuntimeHttp::Get. On a network error the body
     // returned is the empty string and status is 0.
+    //
+    // Hostile .lua files are a real concern. A malicious script dropped
+    // into stplug-in could pair lcHttpGet with the addappid/setStat read
+    // surface and silently exfil to whatever URL the attacker controls.
+    // The host gate below kills that vector. The hardcoded set covers the
+    // hosts SteaMidra's official update flows actually need, and the user
+    // can extend through `[lua] http_allowlist` if they're using a private
+    // mirror. Anything not on the combined list returns 403/empty without
+    // the network ever being reached.
+    namespace {
+        // Hardcoded baseline. Anyone trying to run an official LumaCore
+        // workflow needs these regardless of config. Lowercased once on
+        // declaration so the comparison loop is plain memcmp.
+        constexpr std::string_view kHttpBaselineHosts[] = {
+            "manifesthub1.filegear-sg.me",
+            "raw.githubusercontent.com",
+            "cdn.jsdelivr.net",
+            "gitflic.ru",
+            "api.github.com",
+        };
+
+        // Strip "http(s)://" from the front of a URL and grab everything up
+        // to the first `/`, `?`, `#`, or `:`. Returns empty on a malformed
+        // URL (no scheme prefix, no host body).
+        std::string_view ExtractHost(std::string_view url) {
+            constexpr std::string_view https = "https://";
+            constexpr std::string_view http  = "http://";
+            std::string_view rest = url;
+            if (rest.size() >= https.size() &&
+                std::equal(https.begin(), https.end(), rest.begin(),
+                           [](char a, char b) {
+                               return std::tolower(static_cast<unsigned char>(a)) ==
+                                      std::tolower(static_cast<unsigned char>(b));
+                           })) {
+                rest.remove_prefix(https.size());
+            } else if (rest.size() >= http.size() &&
+                       std::equal(http.begin(), http.end(), rest.begin(),
+                                  [](char a, char b) {
+                                      return std::tolower(static_cast<unsigned char>(a)) ==
+                                             std::tolower(static_cast<unsigned char>(b));
+                                  })) {
+                rest.remove_prefix(http.size());
+            } else {
+                return {};
+            }
+            std::size_t end = rest.size();
+            for (std::size_t i = 0; i < rest.size(); ++i) {
+                char c = rest[i];
+                if (c == '/' || c == '?' || c == '#' || c == ':') { end = i; break; }
+            }
+            return rest.substr(0, end);
+        }
+
+        bool HostMatchesIgnoreCase(std::string_view a, std::string_view b) {
+            if (a.size() != b.size()) return false;
+            for (std::size_t i = 0; i < a.size(); ++i) {
+                if (std::tolower(static_cast<unsigned char>(a[i])) !=
+                    std::tolower(static_cast<unsigned char>(b[i])))
+                    return false;
+            }
+            return true;
+        }
+
+        bool IsHostAllowed(std::string_view host) {
+            if (host.empty()) return false;
+            for (auto h : kHttpBaselineHosts) {
+                if (HostMatchesIgnoreCase(host, h)) return true;
+            }
+            for (const auto& h : Settings::luaHttpAllowlistExtra) {
+                if (HostMatchesIgnoreCase(host, h)) return true;
+            }
+            return false;
+        }
+    }
+
     int Bind_lcHttpGet(lua_State* L) {
         if (lua_gettop(L) < 1) {
             return luaL_error(L, "lcHttpGet: need url string");
         }
         std::string_view url = CheckString(L, 1, "lcHttpGet");
+
+        // Gate enforcement before the URL ever reaches WinHTTP. A blocked
+        // URL surfaces as status=403, body="" so the caller's flow looks
+        // like a real "host said no" response, no script can branch on
+        // "did the gate fire" vs "did the upstream server reject me".
+        std::string_view host = ExtractHost(url);
+        if (!IsHostAllowed(host)) {
+            LOG_LUA_WARN("lcHttpGet: host '{}' blocked by allowlist for url='{}'",
+                         host.empty() ? std::string_view("<unparseable>") : host,
+                         TruncForLog(url));
+            lua_pushlstring(L, "", 0);
+            lua_pushinteger(L, 403);
+            return 2;
+        }
+
         const auto resp = RuntimeHttp::Get(url);
         if (resp.networkError) {
             LOG_LUA_DEBUG("lcHttpGet: net error '{}' for url='{}'",

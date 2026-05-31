@@ -7,6 +7,7 @@
 
 #include "entry.h"
 #include "utils/Logger.h"
+#include "utils/PatternSig.h"
 #include "utils/Settings.h"
 
 #include <windows.h>
@@ -819,11 +820,60 @@ namespace PatternFetcher {
     }
 
     namespace {
-        // Network fetch chain: user-mirror (optional) → github primary → cdn.
-        // Returns the first body that fetched and parsed cleanly. The caller
-        // owns the cache write so we can keep the parse result and the body
-        // close together. fetchedBody is the raw TOML text that landed; map
-        // is the parsed entry table the caller installs.
+        // Centralise the "did this body pass our signature gate" decision
+        // so every leg of the fetch chain runs the same check. Returns
+        // true when the caller can safely consume the body, false when
+        // the leg must be demoted (and the next leg tried).
+        //
+        // sigUrl is body_url + ".sig". A 404 is treated as "no signature
+        // shipped"; with require_signed=false that's accepted with a warn,
+        // with require_signed=true it's a hard reject. Bad signatures are
+        // always a hard reject regardless of the flag because that's the
+        // tampering signal we actually care about.
+        bool VerifyLegBody(const char* legLabel,
+                           const char* subdir,
+                           const std::string& bodyUrl,
+                           std::string_view body)
+        {
+            std::string sigUrl = bodyUrl + ".sig";
+            HttpResult sigResp = HttpGet(sigUrl);
+
+            std::string_view sigBody;
+            if (sigResp.status == 200 && !sigResp.netError && !sigResp.bodyTooLarge) {
+                sigBody = sigResp.body;
+            }
+            // 404 / non-200 / network error all collapse to "no sig" and
+            // PatternSig::Verify will return Missing.
+
+            PatternSig::Result vr = PatternSig::Verify(body, sigBody);
+            if (vr == PatternSig::Result::Ok) {
+                return true;
+            }
+
+            const bool fatal = (vr == PatternSig::Result::BadSignature) ||
+                               (vr == PatternSig::Result::InvalidShape) ||
+                               Settings::patternRequireSigned;
+
+            if (fatal) {
+                LOG_PKGCH_WARN(
+                    "PatternFetcher: {} leg for {} REJECTED, signature {} (require_signed={})",
+                    legLabel, subdir, PatternSig::ResultToStr(vr),
+                    Settings::patternRequireSigned ? "true" : "false");
+                return false;
+            }
+
+            LOG_PKGCH_WARN(
+                "PatternFetcher: {} leg for {} accepted UNSIGNED, signature {} "
+                "(require_signed=false; flip to true once sigs ship)",
+                legLabel, subdir, PatternSig::ResultToStr(vr));
+            return true;
+        }
+
+        // Network fetch chain: user-mirror (optional) -> github primary -> cdn.
+        // Returns the first body that fetched, parsed, AND signature-verified
+        // cleanly. The caller owns the cache write so we can keep the parse
+        // result and the body close together. fetchedBody is the raw TOML
+        // text that landed; map is the parsed entry table the caller installs.
         bool FetchFromNetwork(const char* subdir, const std::string& sha,
                               std::string& fetchedBody, EntryMap& map,
                               Source& sourceOut, std::string& errOut)
@@ -837,16 +887,20 @@ namespace PatternFetcher {
                                                       subdir, sha);
                 HttpResult h = HttpGet(url);
                 if (h.status == 200 && !h.bodyTooLarge && !h.netError && !h.body.empty()) {
-                    std::string perr;
-                    EntryMap parsed;
-                    if (ParseToml(h.body, parsed, perr)) {
-                        fetchedBody = std::move(h.body);
-                        map         = std::move(parsed);
-                        sourceOut   = Source::UserMirror;
-                        return true;
+                    if (!VerifyLegBody("user-mirror", subdir, url, h.body)) {
+                        // sig rejected; fall through to github primary
+                    } else {
+                        std::string perr;
+                        EntryMap parsed;
+                        if (ParseToml(h.body, parsed, perr)) {
+                            fetchedBody = std::move(h.body);
+                            map         = std::move(parsed);
+                            sourceOut   = Source::UserMirror;
+                            return true;
+                        }
+                        LOG_MISC_DEBUG("PatternFetcher: user-mirror parse failed for {} ({}); "
+                                       "falling through to github primary", subdir, perr);
                     }
-                    LOG_MISC_DEBUG("PatternFetcher: user-mirror parse failed for {} ({}); "
-                                   "falling through to github primary", subdir, perr);
                 } else if (h.bodyTooLarge) {
                     LOG_MISC_DEBUG("PatternFetcher: user-mirror body >1MiB for {}; "
                                    "falling through to github primary", subdir);
@@ -863,16 +917,20 @@ namespace PatternFetcher {
                 std::string url = BuildPrimaryUrl(subdir, sha);
                 HttpResult h = HttpGet(url);
                 if (h.status == 200 && !h.bodyTooLarge && !h.netError && !h.body.empty()) {
-                    std::string perr;
-                    EntryMap parsed;
-                    if (ParseToml(h.body, parsed, perr)) {
-                        fetchedBody = std::move(h.body);
-                        map         = std::move(parsed);
-                        sourceOut   = Source::Github;
-                        return true;
+                    if (!VerifyLegBody("github", subdir, url, h.body)) {
+                        // sig rejected; fall through to cdn
+                    } else {
+                        std::string perr;
+                        EntryMap parsed;
+                        if (ParseToml(h.body, parsed, perr)) {
+                            fetchedBody = std::move(h.body);
+                            map         = std::move(parsed);
+                            sourceOut   = Source::Github;
+                            return true;
+                        }
+                        LOG_MISC_DEBUG("PatternFetcher: github primary parse failed for {} ({})",
+                                       subdir, perr);
                     }
-                    LOG_MISC_DEBUG("PatternFetcher: github primary parse failed for {} ({})",
-                                   subdir, perr);
                 } else if (h.status == 404) {
                     primary404 = true;
                 }
@@ -883,16 +941,20 @@ namespace PatternFetcher {
                 std::string url = BuildCdnUrl(subdir, sha);
                 HttpResult h = HttpGet(url);
                 if (h.status == 200 && !h.bodyTooLarge && !h.netError && !h.body.empty()) {
-                    std::string perr;
-                    EntryMap parsed;
-                    if (ParseToml(h.body, parsed, perr)) {
-                        fetchedBody = std::move(h.body);
-                        map         = std::move(parsed);
-                        sourceOut   = Source::Cdn;
-                        return true;
+                    if (!VerifyLegBody("cdn", subdir, url, h.body)) {
+                        // sig rejected; fall through to gitflic
+                    } else {
+                        std::string perr;
+                        EntryMap parsed;
+                        if (ParseToml(h.body, parsed, perr)) {
+                            fetchedBody = std::move(h.body);
+                            map         = std::move(parsed);
+                            sourceOut   = Source::Cdn;
+                            return true;
+                        }
+                        LOG_MISC_DEBUG("PatternFetcher: cdn parse failed for {} ({})",
+                                       subdir, perr);
                     }
-                    LOG_MISC_DEBUG("PatternFetcher: cdn parse failed for {} ({})",
-                                   subdir, perr);
                 }
             }
 
@@ -910,16 +972,26 @@ namespace PatternFetcher {
                         LOG_MISC_DEBUG("PatternFetcher: gitflic stitch failed for {} "
                                        "(body shape changed?)", subdir);
                     } else {
-                        std::string perr;
-                        EntryMap parsed;
-                        if (ParseToml(stitched, parsed, perr)) {
-                            fetchedBody = std::move(stitched);
-                            map         = std::move(parsed);
-                            sourceOut   = Source::Gitflic;
-                            return true;
+                        // gitflic publishes blobLines around the same body
+                        // the maintainer signed, so the .sig sits next to
+                        // the canonical TOML on github. Reuse the github
+                        // primary URL for the .sig fetch so the gitflic
+                        // mirror does not need its own sig endpoint.
+                        std::string sigPeerUrl = BuildPrimaryUrl(subdir, sha);
+                        if (!VerifyLegBody("gitflic", subdir, sigPeerUrl, stitched)) {
+                            // sig rejected; bail out of the network chain
+                        } else {
+                            std::string perr;
+                            EntryMap parsed;
+                            if (ParseToml(stitched, parsed, perr)) {
+                                fetchedBody = std::move(stitched);
+                                map         = std::move(parsed);
+                                sourceOut   = Source::Gitflic;
+                                return true;
+                            }
+                            LOG_MISC_DEBUG("PatternFetcher: gitflic parse failed for {} ({})",
+                                           subdir, perr);
                         }
-                        LOG_MISC_DEBUG("PatternFetcher: gitflic parse failed for {} ({})",
-                                       subdir, perr);
                     }
                 } else {
                     LOG_MISC_DEBUG("PatternFetcher: gitflic failed for {} (status={} "

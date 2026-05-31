@@ -31,6 +31,17 @@ namespace Settings {
     // [lua]
     inline std::vector<std::string> luaPaths;
 
+    // [lua] http_allowlist
+    // Extra hosts that lcHttpGet() lua binding may reach. The default set
+    // (manifesthub, github raw, jsdelivr cdn) is hardcoded and always
+    // honoured even when the user clears this list. Any host in this
+    // list is matched case-insensitively against the URL's host portion;
+    // exact match only, no wildcards. Anything not on the combined list
+    // gets a 403/empty-body response without the network ever being hit,
+    // which is the data-exfil mitigation. Adding "*" is treated as
+    // empty (we do NOT support disabling the gate).
+    inline std::vector<std::string> luaHttpAllowlistExtra;
+
     // [pattern_fetch] mirror
     // Optional URL template for the pattern repo, with {subdir} and {sha}
     // placeholders. Empty string means "no override; go straight to the
@@ -42,6 +53,18 @@ namespace Settings {
     // blocked or rate-limited (RU primarily). Sits after the github + cdn
     // legs and before the local cache. Set to false to skip it entirely.
     inline bool patternGitflicEnabled = true;
+
+    // [pattern_fetch] require_signed
+    // When true, the pattern fetcher refuses every TOML body whose .sig
+    // sidecar fails RSA-PSS-SHA256 verification against the LumaCore-
+    // embedded public key. The signature lives at <body_url>.sig — same
+    // path with a ".sig" suffix appended. When false, we still verify and
+    // log a warning on a missing/bad signature but installed entries from
+    // unsigned legs are accepted for back-compat with pattern repos that
+    // haven't started shipping signatures yet. Default false until the
+    // pattern repo rolls out signed TOMLs across the whole tree, then
+    // flip this to true to make rejection fatal.
+    inline bool patternRequireSigned = false;
 
     // [manifest_fetch]
     // URL templates the wire-level GetManifestRequestCode bridge hits when

@@ -68,6 +68,16 @@ namespace Settings {
                             luaPaths.push_back(*s);
                     }
                 }
+                // Drop the user's extra hosts in alongside the hardcoded
+                // defaults. We don't lowercase here, the gate does that
+                // when comparing.
+                if (auto arr = (*luaTbl)["http_allowlist"].as_array()) {
+                    for (const auto& elem : *arr) {
+                        if (auto s = elem.value<std::string>()) {
+                            if (!s->empty()) luaHttpAllowlistExtra.push_back(*s);
+                        }
+                    }
+                }
             }
 
             // [pattern_fetch]
@@ -76,6 +86,8 @@ namespace Settings {
                     patternMirror = *m;
                 if (auto g = (*patternTbl)["gitflic_enabled"].value<bool>())
                     patternGitflicEnabled = *g;
+                if (auto r = (*patternTbl)["require_signed"].value<bool>())
+                    patternRequireSigned = *r;
             }
 
             // [manifest_fetch]

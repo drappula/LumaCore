@@ -287,7 +287,11 @@ namespace LuaLoader {
             if (ec) break;
             if (!entry.is_regular_file()) continue;
             if (entry.path().extension() != ".lua") continue;
-            ParseFile(entry.path().string());
+            // Canonicalize to the same shape DirWatch's Harvest produces so
+            // a later UnloadFile lookup hits the same g_fileDepots key.
+            // Without this a slash flip between boot and runtime makes
+            // the unload silently no-op.
+            ParseFile(entry.path().lexically_normal().make_preferred().string());
         }
 
         // The first directory pass populates DepotKeySet but we don't want
