@@ -1,22 +1,25 @@
 # LumaCore
 
-LumaCore is the DLL component that SteaMidra injects into Steam to handle family-sharing bypass, depot key loading, achievement spoofing, and legacy CD-key suppression.
+LumaCore is the DLL component that SteaMidra injects into Steam to handle family-sharing bypass, depot key loading, achievement spoofing, Denuvo authorization, and legacy CD-key suppression.
 
-It ships as two files placed in the Steam installation directory:
+It ships as four files placed in the Steam installation directory:
 
-- `dwmapi.dll` — thin proxy that Steam loads on startup; immediately loads LumaCore.dll
+- `dwmapi.dll` — thin DWM proxy that Steam loads on startup; immediately loads LumaCore.dll
+- `xinput1_4.dll` — thin XInput 1.4 proxy; backup load gate for LumaCore.dll
 - `LumaCore.dll` — the main hook library
+- `LumaCorePayload.dll` — injected into game processes for online-fix multiplayer (EOS bridge, lobby redirection)
 
 ## How it works
 
-At Steam startup, `dwmapi.dll` runs before any game code and loads `LumaCore.dll`.  LumaCore then:
+At Steam startup, the proxy DLLs load before any game code and load `LumaCore.dll`.  LumaCore then:
 
 1. Copies `steamclient64.dll` to `bin\lcoverlay.dll` so it can be loaded and hooked independently of the live client.
 2. Reads the current Steam build ID from `steam.exe!GetBootstrapperVersion` so byte-pattern searches pick the most accurate signature for the running build.
-3. Installs a set of Detours hooks into the loaded `lcoverlay.dll` copy.
-4. Starts a Lua directory watcher that monitors `config/stplug-in/` for `.lua` files written by SteaMidra.
+3. Fetches per-build pattern TOMLs from the network mirror chain, caches them locally, and primes the runtime pattern map.
+4. Installs 36 Detours hooks plus VEH captures into the loaded `lcoverlay.dll` copy, covering IPC dispatch, package ownership, license patching, Denuvo auth, manifest binding, and network packet rewriting.
+5. Starts a Lua directory watcher that monitors `config/stplug-in/` for `.lua` files written by SteaMidra.
 
-When a Lua file appears or changes, LumaCore parses it, loads depot decryption keys and ownership records, and calls `SteamCapture::NotifyLicenseChanged` to inject the new ownership data into Steam without restarting.
+When a Lua file appears or changes, LumaCore parses it, loads depot decryption keys and ownership records, and injects the new ownership data into Steam without restarting. For online-fix games, LumaCorePayload.dll is injected into the game process via CreateProcess hooks to handle EOS bridge and lobby redirection.
 
 ## Features
 

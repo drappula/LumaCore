@@ -4,18 +4,24 @@ setlocal EnableDelayedExpansion
 set "SOURCE_DIR=%~dp0source"
 set "BUILD_DIR=%~dp0build"
 set "OUT_DIR=%~dp0Releases"
+set "LOG_FILE=%~dp0build_log.txt"
+> "%LOG_FILE%" echo LumaCore build started %DATE% %TIME%
 
 :: --- Argument parsing ----------------------------------------------------
-:: --no-pause   skip the trailing 'pause' (use when running from a script/agent)
-:: --debug-only / --release-only restrict the build to one config
+:: --no-pause      skip the trailing 'pause'
+:: --debug-only    build Debug only
+:: --release-only  build Release only
+:: --clean         remove build dir before building
 set "NO_PAUSE=0"
 set "BUILD_RELEASE=1"
 set "BUILD_DEBUG=1"
+set "DO_CLEAN=0"
 :parse_args
 if "%~1"=="" goto args_done
 if /I "%~1"=="--no-pause"     ( set "NO_PAUSE=1"      & shift & goto parse_args )
 if /I "%~1"=="--debug-only"   ( set "BUILD_RELEASE=0" & shift & goto parse_args )
 if /I "%~1"=="--release-only" ( set "BUILD_DEBUG=0"   & shift & goto parse_args )
+if /I "%~1"=="--clean"        ( set "DO_CLEAN=1"      & shift & goto parse_args )
 echo [WARN] Unknown argument: %~1
 shift
 goto parse_args
@@ -23,28 +29,39 @@ goto parse_args
 
 echo.
 echo ============================================================
-echo  LumaCore Build (ALWAYS CLEAN)
+echo  LumaCore Build
 echo  Source  : %SOURCE_DIR%
 echo  Build   : %BUILD_DIR%
 echo  Output  : %OUT_DIR%
 echo  Release : %BUILD_RELEASE%   Debug: %BUILD_DEBUG%
+if "%DO_CLEAN%"=="1" ( echo  Clean  : YES ) else ( echo  Clean  : NO incremental )
 echo ============================================================
 echo.
 
-:: --- ALWAYS delete build directory to prevent stale cache issues ---
-:: This guarantees that source edits ALWAYS produce updated DLLs — no stale
-:: incremental link, no cached object files. Slower but always correct.
-if exist "%BUILD_DIR%" (
-    echo [STEP] Deleting old build directory...
-    rmdir /S /Q "%BUILD_DIR%"
-    if exist "%BUILD_DIR%" (
-        echo [ERROR] Failed to delete %BUILD_DIR% (file in use?)
-        if "%NO_PAUSE%"=="0" pause
-        exit /b 1
+:: --- Clean build only when --clean is passed -------------------------------
+if "%DO_CLEAN%"=="1" (
+    if exist "%BUILD_DIR%\NUL" (
+        echo [STEP] Cleaning build directory...
+        >> "%LOG_FILE%" echo.
+        >> "%LOG_FILE%" echo [STEP] Cleaning build directory...
+        rmdir /S /Q "%BUILD_DIR%" >> "%LOG_FILE%" 2>&1
+        if exist "%BUILD_DIR%\NUL" (
+            echo [WARN] First clean attempt failed, using PowerShell fallback...
+            >> "%LOG_FILE%" echo [WARN] First clean attempt failed, using PowerShell fallback...
+            powershell -NoProfile -ExecutionPolicy Bypass -Command "$p=[IO.Path]::GetFullPath('%BUILD_DIR%'); $root=[IO.Path]::GetFullPath('%~dp0'); if(-not $p.StartsWith($root,[StringComparison]::OrdinalIgnoreCase)){throw 'Refusing to delete outside LumaCore folder'}; for($i=1; $i -le 5 -and (Test-Path -LiteralPath $p); $i++){ try { Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction Stop } catch { Write-Host ('delete attempt '+$i+' failed: '+$_.Exception.Message); Start-Sleep -Milliseconds 500 } }; if(Test-Path -LiteralPath $p){ exit 1 }" >> "%LOG_FILE%" 2>&1
+            if exist "%BUILD_DIR%\NUL" (
+                echo [ERROR] Failed to delete %BUILD_DIR% (file in use?)
+                echo [ERROR] See %LOG_FILE% for details.
+                if "%NO_PAUSE%"=="0" pause
+                exit /b 1
+            )
+        )
     )
+) else (
+    echo [INFO] Incremental build. Pass --clean for full clean.
 )
 
-:: --- Locate cmake: try PATH first, then the VS Build Tools default install ---
+:: --- Locate cmake ---------------------------------------------------------
 set "CMAKE_EXE=cmake"
 where cmake >nul 2>&1
 if !errorlevel! neq 0 (
@@ -53,15 +70,14 @@ if !errorlevel! neq 0 (
         set "CMAKE_EXE=%ProgramFiles%\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
     )
     if not exist "!CMAKE_EXE!" (
-        echo [ERROR] cmake not found. Add cmake to PATH or install VS Build Tools 2022.
+        echo [ERROR] cmake not found.
         if "%NO_PAUSE%"=="0" pause
         exit /b 1
     )
     echo [INFO] Using cmake from VS Build Tools: !CMAKE_EXE!
 )
 
-:: --- Pick generator: prefer Ninja Multi-Config (fast, parallel, multi-config),
-::     fall back to Visual Studio 17 2022.
+:: --- Pick generator -------------------------------------------------------
 set "GENERATOR=Visual Studio 17 2022"
 set "GEN_ARGS=-A x64"
 where ninja >nul 2>&1
@@ -73,26 +89,28 @@ if !errorlevel! == 0 (
     echo [INFO] Using Visual Studio 17 2022 generator
 )
 
-:: --- Configure ---
+:: --- Configure ------------------------------------------------------------
 echo [STEP] Configuring...
+>> "%LOG_FILE%" echo.
+>> "%LOG_FILE%" echo [STEP] Configuring...
 mkdir "%BUILD_DIR%" 2>nul
-"!CMAKE_EXE!" -S "%SOURCE_DIR%" -B "%BUILD_DIR%" -G "!GENERATOR!" !GEN_ARGS!
+"!CMAKE_EXE!" -S "%SOURCE_DIR%" -B "%BUILD_DIR%" -G "!GENERATOR!" !GEN_ARGS! >> "%LOG_FILE%" 2>&1
 if !errorlevel! neq 0 (
     echo [ERROR] Configure failed.
+    type "%LOG_FILE%"
     if "%NO_PAUSE%"=="0" pause
     exit /b 1
 )
 
-:: --- Build Release and Debug ---
-:: Build Release first so a partial Debug failure doesn't hide a working
-:: Release DLL. Each build step is independent — a Release error does not
-:: stop the Debug build, and vice versa.
+:: --- Build ----------------------------------------------------------------
 set "BUILD_FAILED=0"
 
 if "%BUILD_RELEASE%"=="1" (
     echo.
     echo [STEP] Building Release...
-    "!CMAKE_EXE!" --build "%BUILD_DIR%" --config Release --parallel
+    >> "%LOG_FILE%" echo.
+    >> "%LOG_FILE%" echo [STEP] Building Release...
+    "!CMAKE_EXE!" --build "%BUILD_DIR%" --config Release --parallel >> "%LOG_FILE%" 2>&1
     if !errorlevel! neq 0 (
         echo [WARN] Release build failed.
         set "BUILD_FAILED=1"
@@ -102,14 +120,16 @@ if "%BUILD_RELEASE%"=="1" (
 if "%BUILD_DEBUG%"=="1" (
     echo.
     echo [STEP] Building Debug...
-    "!CMAKE_EXE!" --build "%BUILD_DIR%" --config Debug --parallel
+    >> "%LOG_FILE%" echo.
+    >> "%LOG_FILE%" echo [STEP] Building Debug...
+    "!CMAKE_EXE!" --build "%BUILD_DIR%" --config Debug --parallel >> "%LOG_FILE%" 2>&1
     if !errorlevel! neq 0 (
         echo [WARN] Debug build failed.
         set "BUILD_FAILED=1"
     )
 )
 
-:: --- Copy DLLs to Releases\<Config>\ ---
+:: --- Copy DLLs to Releases ------------------------------------------------
 echo.
 echo [STEP] Copying DLLs to %OUT_DIR%...
 
@@ -119,6 +139,12 @@ if "%BUILD_RELEASE%"=="1" (
         copy /Y "%BUILD_DIR%\Release\LumaCore.dll" "%OUT_DIR%\Release\" >nul
         if exist "%BUILD_DIR%\Release\dwmapi.dll" (
             copy /Y "%BUILD_DIR%\Release\dwmapi.dll" "%OUT_DIR%\Release\" >nul
+        )
+        if exist "%BUILD_DIR%\Release\xinput1_4.dll" (
+            copy /Y "%BUILD_DIR%\Release\xinput1_4.dll" "%OUT_DIR%\Release\" >nul
+        )
+        if exist "%BUILD_DIR%\Release\LumaCorePayload.dll" (
+            copy /Y "%BUILD_DIR%\Release\LumaCorePayload.dll" "%OUT_DIR%\Release\" >nul
         )
         echo [OK] Release DLLs copied to %OUT_DIR%\Release
     ) else (
@@ -133,6 +159,12 @@ if "%BUILD_DEBUG%"=="1" (
         if exist "%BUILD_DIR%\Debug\dwmapi.dll" (
             copy /Y "%BUILD_DIR%\Debug\dwmapi.dll" "%OUT_DIR%\Debug\" >nul
         )
+        if exist "%BUILD_DIR%\Debug\xinput1_4.dll" (
+            copy /Y "%BUILD_DIR%\Debug\xinput1_4.dll" "%OUT_DIR%\Debug\" >nul
+        )
+        if exist "%BUILD_DIR%\Debug\LumaCorePayload.dll" (
+            copy /Y "%BUILD_DIR%\Debug\LumaCorePayload.dll" "%OUT_DIR%\Debug\" >nul
+        )
         echo [OK] Debug DLLs copied to %OUT_DIR%\Debug
     ) else (
         echo [SKIP] Debug LumaCore.dll not produced.
@@ -146,6 +178,8 @@ if "%BUILD_RELEASE%"=="1" echo    %OUT_DIR%\Release
 if "%BUILD_DEBUG%"=="1"   echo    %OUT_DIR%\Debug
 echo ============================================================
 echo.
+>> "%LOG_FILE%" echo.
+>> "%LOG_FILE%" echo Done. Build failed flag: %BUILD_FAILED%
 
 if "%NO_PAUSE%"=="0" pause
 endlocal

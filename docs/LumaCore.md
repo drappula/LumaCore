@@ -6,7 +6,12 @@ This document describes every subsystem in LumaCore, its purpose, the Steam inte
 
 ## Injection chain
 
-Steam loads DLLs from its own directory on startup.  LumaCore exploits this by placing a custom `dwmapi.dll` (a thin proxy that forwards all real DWM exports) alongside `steam.exe`.  When Steam starts, Windows loads the proxy DLL before any game code runs.  The proxy's `DllMain` loads `LumaCore.dll` and returns.
+Steam loads DLLs from its own directory on startup.  LumaCore exploits this by placing two thin proxy DLLs alongside `steam.exe`:
+
+- `dwmapi.dll` — forwards the full DWM API surface and loads `LumaCore.dll` on attach
+- `xinput1_4.dll` — forwards XInput 1.4 exports; acts as a backup load gate, calling `LoadLibraryA("LumaCore.dll")` on process attach as well
+
+When Steam starts, Windows loads the proxy DLLs before any game code runs.  The proxy's `DllMain` loads `LumaCore.dll` and returns.
 
 `LumaCore.dll` then:
 
@@ -35,7 +40,7 @@ rva  = "0xD15DD0"
 sig  = "48 8B C4 55 48 8D 68 A1 48 81 EC C0 00 00 00 48 89 70 18"
 ```
 
-This is the same schema used by the canonical pattern publisher (`OpenSteam001/steam-monitor` `pattern` branch), so a TOML pulled from there can drop straight into `<Steam>\lumacore\pattern\` and resolve.
+The schema matches the runtime pattern map format — TOML files dropped into `<Steam>\lumacore\pattern\` resolve without further conversion.
 
 ### Source priority
 
@@ -67,9 +72,7 @@ python steamclient_analyzer.py "C:\Program Files (x86)\Steam\steamclient64.dll" 
        --emit toml --out-dir PatternsUpdate
 ```
 
-The script computes the SHA-256 of each DLL, locates every target function via a hybrid of string-XRef and byte-pattern matching, and writes `PatternsUpdate/steamclient/<sha>.toml` and `PatternsUpdate/steamui/<sha>.toml` ready for upload to the pattern repo.
-
-By default the script also fetches the canonical pattern publisher's TOML for the same SHA from `OpenSteam001/steam-monitor`'s `pattern` branch (with jsDelivr as a transport fallback) and lets the canonical entries win on shared names. Analyzer-only entries — `RequiresLegacyCDKey` and the DLC / cloud / subscription helpers that LumaCore tracks but the canonical doesn't ship — ride along on top, so a single output file covers everything LumaCore expects. Pass `--no-canonical-overlay` to skip the merge, or `--canonical-overlay-url URL` (repeatable) to point at a different mirror.
+The script computes the SHA-256 of each DLL, locates every target function via a hybrid of string-XRef and byte-pattern matching, and writes `PatternsUpdate/steamclient/<sha>.toml` and `PatternsUpdate/steamui/<sha>.toml` ready for upload to the pattern repo. Pass `--no-canonical-overlay` to skip the merge pass.
 
 The runtime fetcher's own logs (`<Steam>\lumacore\misc.log`) note every overlay, cache, and network step so it's straightforward to triage a build that doesn't resolve cleanly.
 
@@ -77,7 +80,7 @@ The runtime fetcher's own logs (`<Steam>\lumacore\misc.log`) note every overlay,
 
 ## Hook modules
 
-### DepotKeys (`hooks/DepotKeys.cpp`)
+### DepotKeys (`hooks/client/DepotKeys.cpp`)
 
 Hooks `LoadDepotDecryptionKey`.
 
@@ -91,7 +94,7 @@ addappid(1234567, 1, "0A1B2C3D...")  -- depot 1234567, decryption key
 
 ---
 
-### IPCBus (`hooks/IPCBus.cpp`)
+### IPCBus (`hooks/client/IPCBus.cpp`)
 
 Hooks `IPCProcessMessage` and resolves `GetPipeClient` — both via pure byte-pattern matching.
 
@@ -122,7 +125,94 @@ Handles the manifest-key binding that associates a depot manifest with the activ
 
 ---
 
-### SteamCapture (`hooks/SteamCapture.cpp`)
+### DecryptionKeyHook (`hooks/client/DecryptionKeyHook.cpp`)
+
+Hooks `ConfigStoreGetBinary` to intercept Steam's license decryption config reads.
+
+When Steam needs a decryption key for an app license, it calls `ConfigStoreGetBinary` to fetch the encrypted blob. The hook checks the Lua config for a matching app and, if a key is available, writes it to the output buffer. Falls through to the original when no key is known.
+
+Caches app tickets read from the Windows registry under `HKEY_CURRENT_USER\Software\Valve\Steam\Apps\` for use by the AppTicket forge pipeline.
+
+---
+
+### DenuvoAuth (`hooks/client/DenuvoAuth.cpp` + `runtime/ProtectionScan.cpp`)
+
+Handles Denuvo-protected game authorization through Steam's internal pipe handshake.
+
+When a Denuvo game launches, its DRM layer makes several IPC requests to Steam to verify the owner identity. DenuvoAuth tracks these via `PipeWatch` handshake events, scans the game's process modules for Denuvo packer signatures, and enters an authorization window for the first N handshakes. While the window is open, all IPC calls from that pipe see the spoofed owner SteamID instead of the borrower's.
+
+Detection uses three methods in priority order:
+1. **OEP pattern** — scans the entry-point section for the packed OEP byte signature
+2. **Protected blob** — detects W+X sections with high entropy (7.0+), typical of Denuvo's code virtualization
+3. **Legacy section string** — searches for the `DENUVO` string inside known Denuvo PE sections (`.arch`, `.srdata`, `.xpdata`, `.xdata`, `.xtls`)
+
+If all three methods miss but an injected encrypted app ticket exists for the app, the auth path engages anyway as a safety net. The main game executable is always scanned regardless of size; DLLs below 80 MB are skipped as a perf optimization.
+
+Lua interface:
+
+```lua
+forcedenuvo(1234567)  -- force Denuvo auth for this app even if scan misses
+addprocess("game.exe", 1234567)  -- map process name to appId for match-by-exe
+```
+
+---
+
+### PipeWatch (`hooks/client/PipeWatch.cpp`)
+
+Monitors Steam's internal pipe handshake messages to build a live map of connected processes.
+
+On every `Handshake` IPC command, PipeWatch inspects the connecting process: reads its environment block for `SteamAppId`/`SteamGameId`/`SteamOverlayGameId` variables, enumerates loaded modules to detect Steam/EOS/denuvo presence, and builds a `ProcessSnapshot` with the collected data. The snapshot feeds downstream systems like DenuvoAuth (pipe authorization window) and PacketRouter (appId resolution with retry).
+
+---
+
+### IpcDispatch + IpcHooks (`hooks/client/IpcDispatch.cpp`, `hooks/client/IpcHooks.cpp`)
+
+Registers runtime ticket-spoofing IPC handlers through IPCBus's existing dispatch system.
+
+Instead of installing its own `IPCProcessMessage` hook (which would collide with IPCBus), IpcDispatch converts a pre/post handler model into `IpcHandlerEntry` slots that IPCBus dispatches from its own hook. Handlers are registered at startup from per-interface registration functions and keyed on the same `funcHash` values resolved by `IpcLoader`.
+
+The dispatch layer handles response buffer modification for `GetSteamID`, `GetAppOwnershipTicketExtendedData`, `RequestEncryptedAppTicket`, `GetEncryptedAppTicket`, `GetAppID`, and `GetAPICallResult`. All other messages pass through unmodified.
+
+---
+
+### EticketFetcher (`runtime/EticketFetcher.cpp`)
+
+On-demand encrypted app ticket minting via HTTP GET.
+
+When the Lua config calls `setEticket()` or `seteticketurl()`, the fetcher issues an HTTP request to the configured URL and writes the returned blob into LumaCore's credential store. The eticket then feeds into the AppTicket forge pipeline for Denuvo-protected games that need a valid encrypted ticket to pass the DRM check.
+
+---
+
+### OnlineFixInject (`hooks/client/OnlineFixInject.cpp`)
+
+Detours `CreateProcessW` and `CreateProcessAsUserW` to inject `LumaCorePayload.dll` into game processes launched with `-onlinefix`.
+
+When Steam spawns a game process, the hook checks the command line for the `-onlinefix` flag. If present, it creates the process suspended, allocates remote memory for the payload DLL path, queues an APC to call `LoadLibraryW`, and resumes the thread. LumaCorePayload then handles EOS bridge / lobby redirection for online-fix multiplayer.
+
+---
+
+### ManifestOverride (`hooks/client/ManifestBind.cpp` + `runtime/ManifestFetch.cpp`)
+
+Manifest download bridge with HTTPS-first URL chain fallback.
+
+When Steam requests a depot manifest (gid) and the original call fails with a network error, the bridge tries a chain of mirror URLs with `{gid}` substituted into the path. The first server that returns HTTP 200 wins; the response body is written into Steam's internal buffer as if the original call succeeded. Trusted host checking prevents redirects to unexpected domains.
+
+Default URL chain (HTTPS first, HTTP as last resort):
+1. `https://manifest.opensteamtool.com/{gid}`
+2. `https://manifest.steam.run/api/manifest/{gid}`
+3. `http://gmrc.wudrm.com/manifest/{gid}`
+
+---
+
+### KVHooks (`hooks/client/KeyValues.cpp`)
+
+Hooks `ReadAsBinary` and `FindOrCreateKey` on Steam's internal KeyValues tree.
+
+These serve as anchor points for the online-fix pipeline and depot key resolution. `ReadAsBinary` intercepts reads of depot manifest data and allows the manifest bridge to inject fetched content. `FindOrCreateKey` is an install/uninstall logging anchor.
+
+---
+
+### SteamCapture (`hooks/capture/RuntimeCapture.cpp`)
 
 Uses VEH one-shot int3 captures (not Detours hooks) to resolve internal Steam object pointers at runtime.
 
@@ -183,7 +273,7 @@ DLC ownership / install / cloud / license-update / subscribed-app / ownership-ti
 
 ---
 
-### RuntimeCapture (`hooks/RuntimeCapture.cpp`)
+### RuntimeCapture (`hooks/capture/RuntimeCapture.cpp`)
 
 VEH-based captures and hooks used by the `-onlinefix` game-launch path.
 
@@ -193,7 +283,7 @@ VEH-based captures and hooks used by the `-onlinefix` game-launch path.
 
 ---
 
-### RichPresence (`hooks/RichPresence.cpp`)
+### RichPresence (`hooks/client/RichPresence.cpp`)
 
 Patches `CMsgClientPersonaState` protobuf messages intercepted by PacketRouter.
 
@@ -201,7 +291,7 @@ When an online-fix game is running, Steam's presence broadcasts the SpaceWar app
 
 ---
 
-### StringFind (`hooks/StringFind.cpp`)
+### StringFind (`patterns/StringFind.cpp`)
 
 Implements the string cross-reference search used by the `_STR_D` hook macros.  Scans the `.rdata` section of a module for a target string, finds all code locations that reference it via RIP-relative `LEA`/`MOV` instructions, locates the enclosing function via `.pdata` RUNTIME_FUNCTION lookup, and returns the function entry point.
 
@@ -216,7 +306,6 @@ SteaMidra writes `.lua` files to `Steam\config\stplug-in\<appid>.lua`.  LumaCore
 ### App and depot registration
 
 ```lua
--- Register ownership of app 1234567 with a depot decryption key
 addappid(1234567)
 addappid(1001, 1, "0A1B2C3D4E5F6071820394A5B6C7D8E9")
 ```
@@ -224,13 +313,50 @@ addappid(1001, 1, "0A1B2C3D4E5F6071820394A5B6C7D8E9")
 `addappid(appId)` — registers ownership of appId without a depot key.
 `addappid(depotId, 1, "hexkey")` — registers ownership and provides the AES-128 decryption key for depotId.
 
+```lua
+addtoken(1234567, 12345678901234567890)
+```
+
+`addtoken(appId, accessToken)` — registers a package access token for appId used during license validation.
+
 ### Manifest pinning
 
 ```lua
 setManifestid(1001, "1234567890123456789")
 ```
 
-Pins the manifest GID for depot 1001.  LumaCore reports this GID when Steam asks for the active manifest, preventing automatic updates from switching to a newer manifest that may not have a corresponding decryption key.
+Pins the manifest GID for depot 1001. LumaCore reports this GID when Steam asks for the active manifest.
+
+### App tickets and etickets
+
+```lua
+setAppticket(1234567, "base64encodedticketdata")
+setEticket(1234567, "base64encodedeticketdata")
+```
+
+Inject pre-built AppTicket and EncryptedAppTicket blobs for appId. These flow through the credential store and are served by the IPC ticket handlers. Required for Denuvo-protected games.
+
+### Eticket URL configuration
+
+```lua
+seteticketurl("https://example.com/api/eticket/{appid}")
+```
+
+Sets the URL template for on-demand eticket minting. `{appid}` is replaced with the requesting app's ID. The fetcher issues an HTTP GET and writes the returned blob into the credential store for Denuvo auth.
+
+### Denuvo auth controls
+
+```lua
+forcedenuvo(1234567)
+```
+
+Forces Denuvo authorization for appId even when ProtectionScan misses the packer signature. Use when a game crashes with Denuvo error 012.
+
+```lua
+addprocess("game.exe", 1234567)
+```
+
+Maps a process name to an appId for match-by-exe when the process environment block doesn't contain a SteamAppId variable.
 
 ### Stats and achievements
 
@@ -238,7 +364,32 @@ Pins the manifest GID for depot 1001.  LumaCore reports this GID when Steam asks
 setStat(1234567, "76561198028121353")
 ```
 
-Instructs PacketRouter to load achievement and stats data from the given SteamID for app 1234567.  Required when the game checks online achievement state against a specific account.
+Instructs PacketRouter to load achievement and stats data from the given SteamID for app 1234567.
+
+### Manifest and key fetching
+
+```lua
+fetchManifestCode("1234567890123456789")
+fetchManifestCodeEx("1234567890123456789", "base64data")
+```
+
+Fetches depot manifest content from the configured HTTP bridge URLs.
+
+```lua
+getCachedAppTicket(1234567)
+getDecryptionKey(1234567)
+```
+
+Reads cached app ticket and depot decryption key from the Windows registry credential store.
+
+### HTTP helpers
+
+```lua
+lcHttpGet("https://example.com/api/data")
+lcHttpPost("https://example.com/api/submit", "payload")
+```
+
+General-purpose HTTP GET and POST from within Lua scripts. Host-gated to a hardcoded allowlist to prevent data exfiltration by malicious scripts.
 
 ---
 
@@ -280,15 +431,26 @@ When enabled, logs are written to `Steam\lumacore\` alongside `LumaCore.dll`.  E
 
 | File | Module |
 |---|---|
-| `main.log` | Core init, DLL loading, build ID detection |
-| `ipc.log` | IPCBus — IPC message dispatch |
-| `package.log` | PackagePatch / PackageInfo / DirWatch |
-| `capture.log` | SteamCapture / RuntimeCapture VEH events |
-| `packet.log` | PacketRouter — protobuf frame interception |
-| `keyvalue.log` | KVHooks — Install / Uninstall events only (per-call traffic is silent) |
-| `license.log` | LicenseHooks — `OptedInMask` and `RequiresLegacyCDKey` |
-| `misc.log` | Miscellaneous, including the runtime pattern fetcher's overlay / cache / network steps |
-| `status.json` | Single-line snapshot: Steam build id, per-DLL TOML availability, hooks installed / missed |
+| `main.log` | Core init, Lua parsing, DLL loading, hook install events |
+| `corein.log` | Bootstrap pipeline — build ID, diversion load, pattern priming |
+| `ipc.log` | IPCBus + IpcDispatch — IPC handler registration and dispatch |
+| `ipcrtr.log` | IPC router internal trace — per-packet command/pipe/interface logging |
+| `usrcmd.log` | CmdUser — GetSteamID, ticket, and achievement callback handling |
+| `package.log` | PackagePatch — CheckAppOwnership, LoadPackage, NotifyLicenseChanged |
+| `license.log` | LicenseHooks — OptedInMask, RequiresLegacyCDKey, ConfigStoreGetBinary |
+| `decryptionkey.log` | DecryptionKeyHook — license decryption config interception |
+| `auth.log` | DenuvoAuth — authorization window state, SteamID persistence |
+| `eticket.log` | EticketFetcher — HTTP eticket minting calls |
+| `manifest.log` | ManifestFetch — manifest download bridge HTTP steps |
+| `manbnd.log` | ManifestBind — BuildDepotDependency hook events |
+| `onlinefix.log` | OnlineFixInject — CreateProcess hook, payload injection events |
+| `netpacket.log` | PacketRouter + handlers — protobuf frame interception and rewrite |
+| `pktrt.log` | PacketRouter internal trace |
+| `keyvalue.log` | KVHooks — ReadAsBinary / FindOrCreateKey hook events |
+| `steamui.log` | SteamUI — MarkAppChange, RunFrame drain, library removal batching |
+| `achievement.log` | Achievement callback diagnostics |
+| `misc.log` | Miscellaneous — pattern fetcher cache/network steps, VEH captures |
+| `status.json` | Machine-readable snapshot: build id, per-DLL TOML status, hooks installed / missed |
 
 The `pattern\` subdirectory next to these logs holds the cached `<sha>.toml` files the runtime fetcher uses. Files there are safe to delete; they get re-fetched on next launch.
 

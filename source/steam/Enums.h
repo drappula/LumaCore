@@ -1887,3 +1887,8 @@ inline const char* EIPCInterfaceName(EIPCInterface iface) {
 		}
 	}
 }
+
+enum EConfigStore : int32 {
+		k_EConfigStoreInvalid     = -1,
+		k_EConfigStoreUserLocal   =  1,
+	};
