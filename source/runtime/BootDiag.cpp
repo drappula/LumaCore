@@ -84,11 +84,11 @@ namespace BootDiag {
                 "Steamclient:    %s\n\n"
                 "This Steam version may not be supported yet. "
                 "Some game features may not work correctly.\n\n"
-                "This is a read-only diagnostic — your files are not affected.",
+                "This is a read-only diagnostic -- your files are not affected.",
                 g_capturedBuildId.empty() ? "unknown" : g_capturedBuildId.c_str(),
                 g_capturedSha.empty()     ? "unknown" : g_capturedSha.c_str());
 
-            MessageBoxA(nullptr, msg, "LumaCore — Steam Diagnostics",
+            MessageBoxA(nullptr, msg, "LumaCore -- Steam Diagnostics",
                         MB_OK | MB_ICONWARNING | MB_SETFOREGROUND);
         }
 
