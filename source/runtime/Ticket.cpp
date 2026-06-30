@@ -269,6 +269,31 @@ namespace Ticket {
     //      modified (best heuristic for "current user").
     // ════════════════════════════════════════════════════════════════
     uint64_t GetActiveSteamID64() {
+        auto ReadCached = []() -> uint64_t {
+            char buf[32] = {};
+            DWORD sz = sizeof(buf);
+            if (RegGetValueA(HKEY_CURRENT_USER, "Software\\Valve\\Steam\\lumacore",
+                             "LastActiveSteamId", RRF_RT_REG_SZ, nullptr, buf, &sz) == ERROR_SUCCESS) {
+                char* end = nullptr;
+                uint64_t v = strtoull(buf, &end, 16);
+                if (end && *end == '\0' && v != 0) return v;
+            }
+            return 0;
+        };
+        auto WriteCache = [](uint64_t sid) {
+            if (sid == 0) return;
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "%llX", static_cast<unsigned long long>(sid));
+            HKEY hk = nullptr;
+            if (RegCreateKeyExA(HKEY_CURRENT_USER, "Software\\Valve\\Steam\\lumacore",
+                                0, nullptr, 0, KEY_WRITE, nullptr, &hk, nullptr) == ERROR_SUCCESS) {
+                RegSetValueExA(hk, "LastActiveSteamId", 0, REG_SZ,
+                               reinterpret_cast<const BYTE*>(buf),
+                               static_cast<DWORD>(std::strlen(buf) + 1));
+                RegCloseKey(hk);
+            }
+        };
+
         // 1. ActiveProcess\ActiveUser (live value while Steam is running)
         DWORD accountId = 0;
         DWORD size = sizeof(accountId);
@@ -287,6 +312,7 @@ namespace Ticket {
                 "Software\\Valve\\Steam\\ActiveProcess",
                 "Universe");
             const uint64_t steamID64 = ComposeSteamID64(accountId, ParseUniverseName(universe));
+            WriteCache(steamID64);
             LOG_DEBUG("GetActiveSteamID64: ActiveProcess\\ActiveUser={} universe={} -> SteamID64=0x{:X}",
                       accountId, universe.empty() ? "Public" : universe, steamID64);
             return steamID64;
@@ -302,8 +328,9 @@ namespace Ticket {
         char steamPath[MAX_PATH] = {};
         if (RegGetValueA(HKEY_CURRENT_USER, "Software\\Valve\\Steam", "SteamPath",
                          RRF_RT_REG_SZ, nullptr, steamPath, &pathLen) != ERROR_SUCCESS) {
-            LOG_DEBUG("GetActiveSteamID64: no ActiveUser, no SteamPath — give up");
-            return 0;
+            uint64_t cached = ReadCached();
+            LOG_DEBUG("GetActiveSteamID64: no ActiveUser, no SteamPath — fallback to cache=0x{:X}", cached);
+            return cached;
         }
 
         char userdataPath[MAX_PATH];
@@ -315,8 +342,10 @@ namespace Ticket {
         WIN32_FIND_DATAA fd;
         HANDLE hFind = FindFirstFileA(searchPattern, &fd);
         if (hFind == INVALID_HANDLE_VALUE) {
-            LOG_DEBUG("GetActiveSteamID64: no userdata folder at {}", userdataPath);
-            return 0;
+            uint64_t cached = ReadCached();
+            LOG_DEBUG("GetActiveSteamID64: no userdata folder at {} — fallback to cache=0x{:X}",
+                      userdataPath, cached);
+            return cached;
         }
 
         DWORD bestAccountId = 0;
@@ -340,11 +369,14 @@ namespace Ticket {
         FindClose(hFind);
 
         if (bestAccountId == 0) {
-            LOG_DEBUG("GetActiveSteamID64: no userdata\\<accountid>\\ folders found");
-            return 0;
+            uint64_t cached = ReadCached();
+            LOG_DEBUG("GetActiveSteamID64: no userdata\\<accountid>\\ folders found — fallback to cache=0x{:X}",
+                      cached);
+            return cached;
         }
 
         const uint64_t steamID64 = ComposeSteamID64(bestAccountId, 1);
+        WriteCache(steamID64);
         LOG_DEBUG("GetActiveSteamID64: userdata\\{}\\ -> SteamID64=0x{:X} (filesystem fallback)",
                   bestAccountId, steamID64);
         return steamID64;
