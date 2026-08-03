@@ -15,8 +15,6 @@ namespace SteamUI {
 
 namespace LumaCore {
     void Attach();
-    void AttachLight();
-    void AttachHeavy();
     void Detach();
 }
 

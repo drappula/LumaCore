@@ -16,10 +16,10 @@ At Steam startup, the proxy DLLs load before any game code and load `LumaCore.dl
 1. Copies `steamclient64.dll` to `bin\lcoverlay.dll` so it can be loaded and hooked independently of the live client.
 2. Reads the current Steam build ID from `steam.exe!GetBootstrapperVersion` so byte-pattern searches pick the most accurate signature for the running build.
 3. Fetches per-build pattern TOMLs from the network mirror chain, caches them locally, and primes the runtime pattern map.
-4. Installs 36 Detours hooks plus VEH captures into the loaded `lcoverlay.dll` copy, covering IPC dispatch, package ownership, license patching, Denuvo auth, manifest binding, and network packet rewriting.
+4. Installs over 40 Detours hooks plus VEH captures into the loaded `lcoverlay.dll` copy, covering IPC dispatch, package ownership, license patching, Denuvo auth, manifest binding, network packet rewriting, and online-fix game language synchronization.
 5. Starts a Lua directory watcher that monitors `config/stplug-in/` for `.lua` files written by SteaMidra.
 
-When a Lua file appears or changes, LumaCore parses it, loads depot decryption keys and ownership records, and injects the new ownership data into Steam without restarting. For online-fix games, LumaCorePayload.dll is injected into the game process via CreateProcess hooks to handle EOS bridge and lobby redirection.
+When a Lua file appears or changes, LumaCore parses it, loads depot decryption keys and ownership records, and injects the new ownership data into Steam without restarting. For online-fix games, LumaCore synchronizes the game's language setting to Spacewar (480) and LumaCorePayload.dll is injected into the game process via CreateProcess hooks to handle EOS bridge and lobby redirection.
 
 ## Features
 

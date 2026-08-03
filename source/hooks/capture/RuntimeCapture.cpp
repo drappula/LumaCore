@@ -13,6 +13,7 @@
 #include "runtime/ProtectionProbe.h"
 #include "runtime/Ticket.h"
 #include "hooks/client/OnlineFixInject.h"
+#include "hooks/client/DecryptionKeyHook.h"
 #include "core/entry.h"
 
 #include <algorithm>
@@ -133,7 +134,29 @@ namespace {
         return appid;
     }
 
-    // ── BuildSpawnEnvBlock Detours hook ──────────────────────────────────────
+    // ── Language sync for OnlineFix route ──────────────────────────
+    void SyncLanguageToSpacewar(AppId_t realAppId) {
+        if (!realAppId) return;
+        std::string realAcf = DecryptionKeyHook::FindAcfPath(realAppId);
+        if (realAcf.empty()) return;
+        std::string lang = DecryptionKeyHook::ReadAcfLanguage(realAcf);
+        if (lang.empty()) return;
+        DecryptionKeyHook::StoreSpacewarLanguage(lang.c_str());
+        std::string swAcf = DecryptionKeyHook::FindAcfPath(kOnlineFixAppId);
+        if (!swAcf.empty()) {
+            DecryptionKeyHook::WriteAcfLanguage(swAcf, lang);
+            LOG_MISC_INFO("SpawnProcess: 480 ACF language set to {}", lang);
+        }
+        std::string csKey = "UserAppConfig\\" + std::to_string(kOnlineFixAppId);
+        std::string blob = DecryptionKeyHook::BuildUserAppConfigBlob(lang);
+        if (!blob.empty()) {
+            bool ok = DecryptionKeyHook::SetConfigStoreStringEx(csKey.c_str(), blob.c_str(),
+                                                                k_EConfigStoreUserLocal);
+            LOG_MISC_INFO("SpawnProcess: ConfigStore UserAppConfig store=3 ok={} key={} lang={}",
+                          ok, csKey, lang);
+        }
+    }
+
     // Manual -onlinefix keeps the old overlay trick. Dedicated SteamStub auto
     // keeps CGameID as 480 for Steam tracking, and exposes only overlay identity
     // to the real app.
@@ -193,8 +216,10 @@ namespace {
                            cgameAppId, overlayAppId, realAppId,
                            reinterpret_cast<uint64_t>(env));
         }
-        return oBuildSpawnEnvBlock(pThis, pCGameID, a3, env,
-                                    pOverlayCGameID, a6, a7, a8, a9, a10, a11);
+        __int64 result = oBuildSpawnEnvBlock(pThis, pCGameID, a3, env,
+                                              pOverlayCGameID, a6, a7, a8, a9, a10, a11);
+
+        return result;
     }
 
     // ── MarkLicenseAsChanged Detours hook ────────────────────────────────────
@@ -433,6 +458,7 @@ namespace {
                     LOG_MISC_INFO("SpawnProcess: 480 route active reason={} routeMode={} appid {} -> {}, real stored",
                                   routeReason, SteamCapture::OnlineFixRouteModeName(routeMode),
                                   appId, kOnlineFixAppId);
+                    SyncLanguageToSpacewar(appId);
                     if (detectedSteamStub) {
                         SteamStubAuto::Arm(appId, exePath, probeSteamStub ? steamStubProbe.imagePath : "");
                         LOG_MISC_INFO("SpawnProcess: -onlinefix with SteamStub DRM, armed ticket handler");

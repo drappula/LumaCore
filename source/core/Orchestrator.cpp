@@ -7,7 +7,6 @@
 #include "hooks/client/DepotKeys.h"
 #include "hooks/client/DecryptionKeyHook.h"
 #include "hooks/client/IPCBus.h"
-#include "hooks/client/KeyValues.h"
 #include "hooks/client/ManifestBind.h"
 #include "patterns/PatternFetcher.h"
 #include "hooks/capture/SteamCapture.h"
@@ -26,7 +25,6 @@ namespace LumaCore {
         DepotKeys::Install,
         DecryptionKeyHook::Install,
         IPCBus::Install,
-        KVHooks::Install,
         ManifestBind::Install,
         PacketRouter::Install,
         OnlineFixInject::Install,
@@ -36,7 +34,6 @@ namespace LumaCore {
         DepotKeys::Uninstall,
         DecryptionKeyHook::Uninstall,
         IPCBus::Uninstall,
-        KVHooks::Uninstall,
         ManifestBind::Uninstall,
         SteamCapture::Uninstall,
         SteamUI::CoreUnhook,
@@ -47,12 +44,6 @@ namespace LumaCore {
     };
 
     void Attach() { for (auto fn : kInstallOrder) fn(); }
-    void AttachLight() {
-        for (auto fn : {DepotKeys::Install, DecryptionKeyHook::Install, IPCBus::Install,
-                         KVHooks::Install, ManifestBind::Install, PacketRouter::Install,
-                         OnlineFixInject::Install, LicenseHooks::Install}) fn();
-    }
-    void AttachHeavy() { SteamCapture::Install(); }
 
     void Detach() {
 #ifdef LUMACORE_DIAGNOSTICS_ENABLED

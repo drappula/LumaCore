@@ -124,6 +124,10 @@ When Steam needs a decryption key for an app license, it calls `ConfigStoreGetBi
 
 Caches app tickets read from Steam's config store or the Windows registry under `HKEY_CURRENT_USER\Software\Valve\Steam\Apps\` for use by the AppTicket forge pipeline. Source tickets are validated against the active SteamID and their own standard app ID before they can be used for a target app.
 
+Also hooks `CConfigStore::FlushToDisk` to protect the online-fix language synchronization. When ConfigStore flushes its in-memory state to disk it would normally overwrite the Spacewar (480) ACF's `UserConfig\language` field. The hook re-applies the target language after every flush so the ACF stays in sync until the next language change.
+
+Resolves `CConfigStore::SetString` (without detouring it) so `SetConfigStoreStringEx` can write a `UserAppConfig\480` binary blob directly into ConfigStore's UserLocal store. This mirrors the exact format Steam uses when changing a game's language in Properties, keeping ConfigStore's in-memory cache consistent with the on-disk ACF.
+
 ---
 
 ### DenuvoAuth (`hooks/client/DenuvoAuth.cpp` + `runtime/ProtectionScan.cpp`)
@@ -182,7 +186,7 @@ When Steam spawns a manual `-onlinefix` game process, the CreateProcess hook cla
 
 ---
 
-### ManifestOverride (`hooks/client/ManifestBind.cpp` + `runtime/ManifestFetch.cpp`)
+### Manifest Bind & Fetch (`hooks/client/ManifestBind.cpp` + `runtime/ManifestFetch.cpp`)
 
 Manifest download bridge with HTTPS-first URL chain fallback.
 
@@ -194,14 +198,6 @@ Default URL chain (HTTPS first, HTTP as last resort):
 3. `http://gmrc.wudrm.com/manifest/{gid}`
 
 The first built-in provider is fetched with its required compatibility User-Agent internally. Custom URLs and the other fallback providers keep LumaCore's normal runtime HTTP User-Agent.
-
----
-
-### KVHooks (`hooks/client/KeyValues.cpp`)
-
-Hooks `ReadAsBinary` and `FindOrCreateKey` on Steam's internal KeyValues tree.
-
-These serve as anchor points for the online-fix pipeline and depot key resolution. `ReadAsBinary` intercepts reads of depot manifest data and allows the manifest bridge to inject fetched content. `FindOrCreateKey` is an install/uninstall logging anchor.
 
 ---
 
@@ -286,6 +282,7 @@ VEH-based captures and hooks used by game-launch routing.
 - Retries startup Package 0 injection after package-info capture, user capture, a longer post-hook retry window, and throttled SteamUI run-frame retries. Offline startup can still update the local package vector when Package 0 and vector growth are ready, even if Steam never reaches the user-license refresh path.
 - Lua hot reload mutates Package 0 first, refreshes licenses only when the user object exists, then queues library UI touches/removals for SteamUI's run-frame hook. It does not dispatch app-overview changes from the package thread.
 - Uses `GetAppDataFromAppInfo` captures from `SteamCapture` to resolve game names for rich-presence labelling.
+- **Language sync for online-fix**: When a manual `-onlinefix` launch is detected, `SyncLanguageToSpacewar` reads the real game's ACF `UserConfig\language`, writes it into the Spacewar (480) ACF, and pushes a `UserAppConfig\480` binary blob into ConfigStore's UserLocal store. The `CConfigStore::FlushToDisk` hook in `DecryptionKeyHook.cpp` protects the ACF from Steam reverting it mid-session. The blob format mirrors what Steam itself writes when changing a game's language in Properties, so `GetCurrentGameLanguage()` sees the target language on the first launch after a Steam restart.
 
 ---
 
@@ -434,7 +431,6 @@ When enabled, logs are written to `Steam\lumacore\` alongside `LumaCore.dll`.  E
 | `onlinefix.log` | OnlineFixInject — CreateProcess hook, payload injection events |
 | `netpacket.log` | PacketRouter + handlers — protobuf frame interception and rewrite |
 | `pktrt.log` | PacketRouter internal trace |
-| `keyvalue.log` | KVHooks — ReadAsBinary / FindOrCreateKey hook events |
 | `steamui.log` | SteamUI — MarkAppChange, RunFrame drain, queued library touch/removal |
 | `achievement.log` | Achievement callback diagnostics |
 | `misc.log` | Miscellaneous — pattern fetcher cache/network steps, VEH captures |

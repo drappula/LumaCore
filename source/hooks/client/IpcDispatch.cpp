@@ -36,10 +36,6 @@ namespace IpcDispatch {
         // Persist dynamically-constructed handler names so busEntry.name
         // never points to a destroyed temporary.
         std::deque<std::string> g_handlerNames;
-
-        static void IpcBusTrampoline(CSteamPipeClient* pipe, CUtlBuffer* pRead, CUtlBuffer* pWrite) {
-            (void)pipe; (void)pRead; (void)pWrite;
-        }
     }
 
     void Register(std::string_view ifaceName, std::string_view methodName, PreFn pre, PostFn post) {

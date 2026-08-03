@@ -85,7 +85,6 @@ add_library(LumaCore SHARED
     hooks/client/IPCBus.cpp
     hooks/client/CmdUser.cpp
     hooks/client/CmdUtils.cpp
-    hooks/client/KeyValues.cpp
     hooks/client/ManifestBind.cpp
     hooks/client/PacketRouter.cpp
     hooks/client/NetPacket.cpp
@@ -104,7 +103,6 @@ add_library(LumaCore SHARED
     hooks/client/AuthWindow.cpp
     hooks/client/AsyncTicketMap.cpp
     hooks/client/DecryptionKeyHook.cpp
-    hooks/client/ManifestOverride.cpp
     hooks/client/PendingCallMap.cpp
     hooks/client/OnlineFixInject.cpp
     hooks/client/ProcessExtension.cpp

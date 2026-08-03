@@ -497,17 +497,6 @@ namespace SteamUI {
         LOG_STEAMUICH_INFO("RemoveAppOverview: appId={} done", appId);
     }
 
-    // Kept for API stability; only used when callers explicitly want a
-    // multi-id dispatch. The live NotifyLicenseChanged path uses per-id
-    // RemoveAppOverview because Steam's webhelper handler crashes on
-    // multi-id CAppOverview_Change bursts in some build/load combos.
-    void RemoveAppOverviewBatch(const AppId_t* ids, size_t count) {
-        if (!ids || count == 0) return;
-        for (size_t idx = 0; idx < count; ++idx) {
-            RemoveAppOverview(ids[idx]);
-        }
-    }
-
     void QueueLibraryRemoval(AppId_t appId) {
         std::lock_guard<std::mutex> lock(g_removalMutex);
         if (std::find(g_pendingRemovals.begin(), g_pendingRemovals.end(), appId) == g_pendingRemovals.end())

@@ -22,11 +22,6 @@ namespace SteamUI {
     // CSteamApp owned flag so the next full snapshot also excludes it.
     void RemoveAppOverview(AppId_t appId);
 
-    // Batch eviction: filter out non-app IDs (sub-depots that have no
-    // CSteamApp) and emit a single CAppOverview_Change for the rest. The
-    // per-id variant above just calls into this with count=1.
-    void RemoveAppOverviewBatch(const AppId_t* ids, size_t count);
-
     // Queues an appId for removal from the library UI on the next
     // CSteamUIAppControllerRunFrame tick. Thread-safe.
     void QueueLibraryRemoval(AppId_t appId);
