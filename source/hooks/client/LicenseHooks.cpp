@@ -121,13 +121,13 @@ namespace {
         const char* routeName = SteamCapture::OnlineFixRouteIsSteamStubAuto()
             ? "steamstub-auto"
             : SteamCapture::OnlineFixRouteModeName(SteamCapture::OnlineFixMode());
-        if (appId == kOnlineFixAppId && realAppId) {
-            LOG_MISC_INFO("OptedInMask: routeMode={} appid {} -> {}",
-                          routeName, appId, realAppId);
+        if (realAppId && appId != realAppId) {
+            LOG_MISC_TRACE("OptedInMask: routeMode={} appid {} -> {} (redirected)",
+                           routeName, appId, realAppId);
             return oOptedInMask(pThis, realAppId);
         }
-        LOG_MISC_TRACE("OptedInMask: routeMode={} appid {} (realAppId={}, no redirect)",
-                       routeName, appId, realAppId);
+        LOG_MISC_TRACE("OptedInMask: routeMode={} appid {} (no redirect)",
+                       routeName, appId);
         return oOptedInMask(pThis, appId);
     }
 

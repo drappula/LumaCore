@@ -254,7 +254,18 @@ namespace DecryptionKeyHook {
     void WriteAcfLanguage(const std::string& acfPath, const std::string& lang) {
         if (lang.empty()) return;
         std::ifstream in(acfPath);
-        if (!in) return;
+        if (!in) {
+            std::ofstream out(acfPath, std::ios::trunc);
+            if (!out) return;
+            out << "\"AppState\"\n{\n\t\"appid\"\t\t\"480\"\n"
+                   "\t\"name\"\t\t\"Spacewar\"\n"
+                   "\t\"StateFlags\"\t\t\"4\"\n"
+                   "\t\"installdir\"\t\t\"Spacewar\"\n"
+                   "\t\"UserConfig\"\n\t{\n\t\t\"language\"\t\t\""
+                << lang << "\"\n\t}\n}\n";
+            out.close();
+            return;
+        }
         std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         in.close();
         auto uc = content.find("\"UserConfig\"");

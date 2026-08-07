@@ -69,10 +69,11 @@ namespace IpcDispatch {
 
             // Map EIPCInterface name to enum via static lookup table
             static constexpr std::pair<const char*, EIPCInterface> kIfaceMap[] = {
-                {"IClientUser",       EIPCInterface::IClientUser},
-                {"IClientUserStats",  EIPCInterface::IClientUserStats},
-                {"IClientUtils",      EIPCInterface::IClientUtils},
-                {"IClientAppManager", EIPCInterface::IClientAppManager},
+                {"IClientUser",            EIPCInterface::IClientUser},
+                {"IClientUserStats",       EIPCInterface::IClientUserStats},
+                {"IClientUtils",           EIPCInterface::IClientUtils},
+                {"IClientAppManager",      EIPCInterface::IClientAppManager},
+                {"IClientRemoteStorage",   EIPCInterface::IClientRemoteStorage},
             };
             auto it = std::find_if(std::begin(kIfaceMap), std::end(kIfaceMap),
                 [&](auto& p) { return std::strcmp(p.first, entry.ifaceName.c_str()) == 0; });

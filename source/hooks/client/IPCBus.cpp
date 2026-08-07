@@ -13,6 +13,7 @@
 #include "runtime/IpcSpecLoader.h"
 #include "hooks/capture/SteamCapture.h"
 #include <map>
+#include <cstdio>
 
 // ── pipe retriever, needed by LM_BIND macro (fn##_t expansion) ──
 using GetPipeClient_t = CSteamPipeClient*(*)(void* pEngine, HSteamPipe hSteamPipe);
@@ -109,7 +110,6 @@ namespace IPCBus::Registry {
 } // namespace IPCBus::Registry
 
 namespace {
-
     using namespace IPCBus::Registry;
 
     // RAII guard: enters stats scope on construction, leaves on destruction.
@@ -131,6 +131,30 @@ namespace {
         }
     };
 
+    LM_HOOK(IClientRemoteStorage_FileExists, bool, void* pThis, const char* pchFile)
+    {
+        uint32_t* pAppId = reinterpret_cast<uint32_t*>(reinterpret_cast<uint8_t*>(pThis) + 0x38);
+        uint32_t saved = *pAppId;
+        AppId_t real = SteamCapture::ActiveRouteRealAppId();
+        if (real && saved == kOnlineFixAppId)
+            *pAppId = real;
+        bool result = oIClientRemoteStorage_FileExists(pThis, pchFile);
+        *pAppId = saved;
+        return result;
+    }
+
+    LM_HOOK(IClientRemoteStorage_Dispatch, bool, void* pThis, void* pArg)
+    {
+        uint32_t* pAppId = reinterpret_cast<uint32_t*>(reinterpret_cast<uint8_t*>(pThis) + 0x38);
+        uint32_t saved = *pAppId;
+        AppId_t real = SteamCapture::ActiveRouteRealAppId();
+        if (real && saved == kOnlineFixAppId)
+            *pAppId = real;
+        bool result = oIClientRemoteStorage_Dispatch(pThis, pArg);
+        *pAppId = saved;
+        return result;
+    }
+
     LM_HOOK(IPCProcessMessage, bool,
               void* pServer, HSteamPipe hPipe,
               CUtlBuffer* pRead, CUtlBuffer* pWrite)
@@ -141,6 +165,113 @@ namespace {
                 const auto iface = static_cast<EIPCInterface>(raw[OFFSET_INTERFACE_ID]);
                 if (iface == EIPCInterface::IClientNetworkingSocketsSerialized)
                     SteamCapture::NotifyNetworkingSocketsUsed();
+                if (iface == EIPCInterface::IClientRemoteStorage) {
+                    uint32_t fHash = *reinterpret_cast<const uint32_t*>(raw + OFFSET_FUNC_HASH);
+                    AppId_t real = SteamCapture::ActiveRouteRealAppId();
+                    if (real && (fHash == 0x376E83D6 || fHash == 0xC69A678D || fHash == 0xA0F6FDBD)) {
+                        DWORD steamId32 = 0;
+                        HKEY hKey;
+                        if (RegOpenKeyExA(HKEY_CURRENT_USER,
+                                "Software\\Valve\\Steam\\ActiveProcess", 0,
+                                KEY_READ | KEY_WOW64_64KEY, &hKey) == ERROR_SUCCESS) {
+                            DWORD cb = sizeof(steamId32);
+                            RegQueryValueExA(hKey, "ActiveUser", nullptr, nullptr,
+                                             reinterpret_cast<LPBYTE>(&steamId32), &cb);
+                            RegCloseKey(hKey);
+                        }
+                        if (steamId32) {
+                            const uint8_t* reqData = raw + IPC_HEADER_SIZE;
+                            const uint32_t reqLen = pRead->TellPut() - IPC_HEADER_SIZE;
+                            char filenameBuf[256]{};
+                            {
+                                const char* p = reinterpret_cast<const char*>(reqData);
+                                const char* end = p + reqLen;
+                                const char* best = nullptr;
+                                int bestLen = 0;
+                                while (p < end) {
+                                    if (*p >= 0x20 && *p < 0x7F) {
+                                        const char* start = p;
+                                        while (p < end && *p >= 0x20 && *p < 0x7F) ++p;
+                                        int len = static_cast<int>(p - start);
+                                        if (len > bestLen) { bestLen = len; best = start; }
+                                    } else { ++p; }
+                                }
+                                if (best && bestLen > 0 && bestLen < 256)
+                                    memcpy(filenameBuf, best, bestLen);
+                            }
+                            if (filenameBuf[0]) {
+                                char savePath[512];
+                                snprintf(savePath, sizeof(savePath),
+                                         "%s/userdata/%u/%u/remote/%s",
+                                         SteamInstallPath, steamId32, real, filenameBuf);
+
+                                auto ensureCap = [&](uint32_t need) -> bool {
+                                    if (pWrite->m_Memory.m_nAllocationCount >= need) return true;
+                                    if (!pWrite->m_PutOverflowFunc) return false;
+                                    return (pWrite->*pWrite->m_PutOverflowFunc)(need);
+                                };
+
+                                if (fHash == 0x376E83D6) {  // FileExists
+                                    if (GetFileAttributesA(savePath) != INVALID_FILE_ATTRIBUTES) {
+                                        if (ensureCap(14)) {
+                                            uint8_t frame[14] = {};
+                                            uint32_t len = 14; memcpy(frame, &len, 4);
+                                            uint32_t result = 0; memcpy(frame + 4, &result, 4);
+                                            frame[8] = 1;
+                                            memcpy(pWrite->Base(), frame, 14);
+                                            pWrite->m_Put = 14;
+                                            LOG_IPCRTR_INFO("\"evt\" \"SaveInject\" \"fn\" \"FileExists\" \"path\" \"{}\" \"result\" \"found\"", savePath);
+                                            return true;
+                                        }
+                                        LOG_IPCRTR_INFO("\"evt\" \"SaveInject\" \"fn\" \"FileExists\" \"path\" \"{}\" \"result\" \"cap-grow-failed\"", savePath);
+                                    } else {
+                                        LOG_IPCRTR_INFO("\"evt\" \"SaveInject\" \"fn\" \"FileExists\" \"path\" \"{}\" \"result\" \"not-found\"", savePath);
+                                    }
+                                } else if (fHash == 0xC69A678D) {  // GetFileSize
+                                    HANDLE hFile = CreateFileA(savePath, GENERIC_READ,
+                                        FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                                        FILE_ATTRIBUTE_NORMAL, nullptr);
+                                    if (hFile != INVALID_HANDLE_VALUE) {
+                                        DWORD fileSize = GetFileSize(hFile, nullptr);
+                                        CloseHandle(hFile);
+                                        if (fileSize != INVALID_FILE_SIZE && ensureCap(14)) {
+                                            uint8_t frame[14] = {};
+                                            uint32_t len = 14; memcpy(frame, &len, 4);
+                                            uint32_t result = 0; memcpy(frame + 4, &result, 4);
+                                            memcpy(frame + 8, &fileSize, 4);
+                                            memcpy(pWrite->Base(), frame, 14);
+                                            pWrite->m_Put = 14;
+                                            LOG_IPCRTR_INFO("\"evt\" \"SaveInject\" \"fn\" \"GetFileSize\" \"path\" \"{}\" \"size\" {}", savePath, fileSize);
+                                            return true;
+                                        }
+                                    }
+                                } else if (fHash == 0xA0F6FDBD) {  // FileRead
+                                    HANDLE hFile = CreateFileA(savePath, GENERIC_READ,
+                                        FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                                        FILE_ATTRIBUTE_NORMAL, nullptr);
+                                    if (hFile != INVALID_HANDLE_VALUE) {
+                                        DWORD fileSize = GetFileSize(hFile, nullptr);
+                                        if (fileSize != INVALID_FILE_SIZE && fileSize < 1 * 1024 * 1024
+                                            && ensureCap(14u + fileSize)) {
+                                            uint8_t frame[14] = {};
+                                            uint32_t totalLen = 14 + fileSize; memcpy(frame, &totalLen, 4);
+                                            uint32_t result = 0; memcpy(frame + 4, &result, 4);
+                                            memcpy(frame + 8, &fileSize, 4);
+                                            memcpy(pWrite->Base(), frame, 14);
+                                            DWORD read = 0;
+                                            ReadFile(hFile, pWrite->Base() + 14, fileSize, &read, nullptr);
+                                            pWrite->m_Put = 14 + read;
+                                            CloseHandle(hFile);
+                                            LOG_IPCRTR_INFO("\"evt\" \"SaveInject\" \"fn\" \"FileRead\" \"path\" \"{}\" \"size\" {} \"read\" {}", savePath, fileSize, read);
+                                            return true;
+                                        }
+                                        CloseHandle(hFile);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -148,6 +279,7 @@ namespace {
         StatsGuard guard(f.statsCall, hPipe);
 
         const bool ok = oIPCProcessMessage(pServer, hPipe, pRead, pWrite);
+
         if (!ok || !f.handler) return ok;
 
         AppId_t appId = SteamCapture::ResolveAppId();
@@ -175,6 +307,18 @@ namespace IPCBus {
 
         LM_TX_BEGIN();
         LM_INSTALL(IPCProcessMessage);
+        {
+            static constexpr StringXRefSig kFileExistsSigs[] = {
+                {"IClientRemoteStorage::FileExists", ""},
+            };
+            LM_INSTALL_STR(IClientRemoteStorage_FileExists, kFileExistsSigs, 1);
+        }
+        {
+            static constexpr StringXRefSig kDispatchSigs[] = {
+                {"IClientRemoteStorage::Dispatch", ""},
+            };
+            LM_INSTALL_STR(IClientRemoteStorage_Dispatch, kDispatchSigs, 1);
+        }
         LM_TX_COMMIT();
 
         LOG_IPCRTR_INFO("\"event\" \"install\" \"hook\" \"0x{:X}\"",
@@ -184,6 +328,8 @@ namespace IPCBus {
     void Uninstall() {
         LM_TX_BEGIN();
         LM_REMOVE(IPCProcessMessage);
+        LM_REMOVE(IClientRemoteStorage_FileExists);
+        LM_REMOVE(IClientRemoteStorage_Dispatch);
         LM_TX_COMMIT();
         oGetPipeClient = nullptr;
         Registry::Clear();

@@ -143,6 +143,9 @@ namespace {
         if (lang.empty()) return;
         DecryptionKeyHook::StoreSpacewarLanguage(lang.c_str());
         std::string swAcf = DecryptionKeyHook::FindAcfPath(kOnlineFixAppId);
+        if (swAcf.empty() && SteamInstallPath[0]) {
+            swAcf = std::string(SteamInstallPath) + "/steamapps/appmanifest_480.acf";
+        }
         if (!swAcf.empty()) {
             DecryptionKeyHook::WriteAcfLanguage(swAcf, lang);
             LOG_MISC_INFO("SpawnProcess: 480 ACF language set to {}", lang);
@@ -217,7 +220,19 @@ namespace {
                            reinterpret_cast<uint64_t>(env));
         }
         __int64 result = oBuildSpawnEnvBlock(pThis, pCGameID, a3, env,
-                                              pOverlayCGameID, a6, a7, a8, a9, a10, a11);
+                                               pOverlayCGameID, a6, a7, a8, a9, a10, a11);
+
+        if (realAppId && env) {
+            const char* p = static_cast<const char*>(env);
+            const char* end = p + 32768;
+            while (p < end && *p) {
+                if (strncmp(p, "SteamAppId=", 11) == 0) {
+                    LOG_MISC_INFO("BuildSpawnEnvBlock: env SteamAppId={}", p + 11);
+                    break;
+                }
+                p += strlen(p) + 1;
+            }
+        }
 
         return result;
     }
@@ -227,10 +242,18 @@ namespace {
     // This replaces the old VEH int3 capture. Detours fires on every call
     // regardless of when the hook was installed, so we always get pCUser.
     LM_HOOK(MarkLicenseAsChanged, int64, void* pThis, uint32 packageId, bool bReloadAll) {
+        bool justCaptured = false;
         if (!g_pCUser) {
             g_pCUser = pThis;
+            justCaptured = true;
             LOG_PACKAGE_INFO("MarkLicenseAsChanged: captured pCUser=0x{:X}",
                              reinterpret_cast<uint64_t>(pThis));
+        }
+        if (justCaptured && g_startupInjectionDone.load(std::memory_order_acquire)
+            && oMarkLicenseAsChanged) {
+            oMarkLicenseAsChanged(pThis, 0, true);
+            HookStatus::SetStartupRefreshState("startup-injected");
+            LOG_PACKAGE_INFO("MarkLicenseAsChanged: pCUser captured, package 0 marked for reload");
         }
         TryStartupInjection("mark-license");
         return oMarkLicenseAsChanged(pThis, packageId, bReloadAll);

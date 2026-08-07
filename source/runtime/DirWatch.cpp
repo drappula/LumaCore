@@ -289,10 +289,14 @@ namespace DirWatch {
             if (!ordering.empty()) {
                 LOG_PKGCH_INFO("DirWatch: processing {} Lua file change(s)", ordering.size());
                 for (const auto& fullPath : ordering) {
-                    if (acc[fullPath] == FILE_ACTION_REMOVED)
-                        LuaLoader::UnloadFile(fullPath);
-                    else
+                    if (acc[fullPath] == FILE_ACTION_REMOVED) {
+                        if (std::filesystem::exists(fullPath))
+                            LuaLoader::ParseFile(fullPath);
+                        else
+                            LuaLoader::UnloadFile(fullPath);
+                    } else {
                         LuaLoader::ParseFile(fullPath);
+                    }
                 }
                 SteamCapture::NotifyLicenseChanged();
                 LOG_PKGCH_INFO("DirWatch: refresh completed");
