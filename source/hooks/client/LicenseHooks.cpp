@@ -187,19 +187,19 @@ namespace {
 
     LM_HOOK(EvaluateRemoteStorageSyncState, std::uint64_t,
             void* pRemoteStorage, AppId_t appId, bool force) {
-        ShouldBlockCloudSync(appId, "evaluate");
+        if (ShouldBlockCloudSync(appId, "evaluate")) return 2;
         return oEvaluateRemoteStorageSyncState(pRemoteStorage, appId, force);
     }
 
     LM_HOOK(RunAutoCloudOnAppLaunch, std::uint64_t,
             void* pRemoteStorage, AppId_t appId) {
-        ShouldBlockCloudSync(appId, "launch");
+        if (ShouldBlockCloudSync(appId, "launch")) return 0;
         return oRunAutoCloudOnAppLaunch(pRemoteStorage, appId);
     }
 
     LM_HOOK(RunAutoCloudOnAppExit, std::uint64_t,
             void* pRemoteStorage, AppId_t appId) {
-        ShouldBlockCloudSync(appId, "exit");
+        if (ShouldBlockCloudSync(appId, "exit")) return 0;
         return oRunAutoCloudOnAppExit(pRemoteStorage, appId);
     }
 

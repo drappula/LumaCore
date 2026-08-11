@@ -157,7 +157,7 @@ namespace HookStatus {
 #endif
 
         constexpr const char* kLumaCoreBuildStamp = __DATE__ " " __TIME__;
-        constexpr const char* kLumaCoreVersion = "V34";
+        constexpr const char* kLumaCoreVersion = "V35";
         constexpr const char* kStartupCaptureRevision = "package0-early-capture-v1";
 
         // Conservative escaper for JSON string literals. The values we emit are
@@ -600,6 +600,13 @@ namespace HookStatus {
         }
 
         bool WriteBodyAtomic(const std::string& body) {
+            static std::atomic<DWORD> s_lastFailMs{0};
+            static constexpr DWORD kCooldownMs = 5000;
+            {
+                DWORD last = s_lastFailMs.load(std::memory_order_relaxed);
+                if (last && GetTickCount() - last < kCooldownMs) return false;
+            }
+
             if (!SteamInstallPath[0]) {
                 LOG_WARN("HookStatus: SteamInstallPath unset, skipping write");
                 return false;
@@ -643,14 +650,17 @@ namespace HookStatus {
                     SetFileAttributesA(narrowTarget.c_str(), FILE_ATTRIBUTE_NORMAL);
                     DeleteFileA(narrowTarget.c_str());
                     if (MoveFileA(narrowTmp.c_str(), narrowTarget.c_str())) {
+                        s_lastFailMs.store(0, std::memory_order_relaxed);
                         return true;
                     }
                 }
                 LOG_WARN("HookStatus: MoveFileExA failed err={} for {}",
                          err, narrowTarget);
+                s_lastFailMs.store(GetTickCount(), std::memory_order_relaxed);
                 DeleteFileA(narrowTmp.c_str());
                 return false;
             }
+            s_lastFailMs.store(0, std::memory_order_relaxed);
             return true;
         }
 
