@@ -205,7 +205,7 @@ namespace {
 
     LM_HOOK(GetRemoteStorageSyncState, std::int32_t,
             void* pRemoteStorage, AppId_t appId) {
-        if (ShouldBlockCloudSync(appId, "state")) return 1;
+        if (ShouldBlockCloudSync(appId, "state")) return 2; // synchronized, not syncing
         return oGetRemoteStorageSyncState(pRemoteStorage, appId);
     }
 
