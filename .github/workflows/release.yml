@@ -1,0 +1,67 @@
+name: Build & Release
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+permissions:
+  contents: write
+# Serialise releases: two rapid pushes must not compute the same tag.
+concurrency:
+  group: lumacore-release
+  cancel-in-progress: false
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Set up MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+      - name: Compute next version
+        id: version
+        shell: pwsh
+        run: |
+          # Tags look like V36, V37, ... SteaMidra treats any tag mismatch
+          # as "update available", so this repo must stay above upstream
+          # KoriaPolis/LumaCore (currently V36) or existing installs
+          # would be "updated" to an older build.
+          $latest = gh release list --limit 1 --json tagName --jq '.[0].tagName' 2>$null
+          $next = 37
+          if (-not [string]::IsNullOrWhiteSpace($latest)) {
+            $m = [regex]::Match($latest, '^V(\d+)$')
+            if ($m.Success) { $next = [int]$m.Groups[1].Value + 1 }
+          }
+          if ($latest) { echo "Latest release: $latest -> next: V$next" } else { echo "No releases yet -> starting at V$next" }
+          "tag=V$next" >> $env:GITHUB_OUTPUT
+      - name: Configure (CMake, x64)
+        shell: pwsh
+        run: cmake -S source -B build -A x64 -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+      - name: Build Release
+        shell: pwsh
+        run: cmake --build build --config Release --parallel
+      - name: Build Debug
+        shell: pwsh
+        run: cmake --build build --config Debug --parallel
+      - name: Verify DLLs
+        shell: pwsh
+        run: |
+          foreach ($dll in @("LumaCore.dll", "LumaCorePayload.dll", "dwmapi.dll", "xinput1_4.dll")) {
+            foreach ($cfg in @("Release", "Debug")) {
+              $p = Join-Path "build" (Join-Path $cfg $dll)
+              if (-not (Test-Path -LiteralPath $p)) { throw "Missing $p" }
+            }
+          }
+          echo "All 4 DLLs present in both configs."
+      - name: Pack artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          foreach ($cfg in @("Release", "Debug")) {
+            $files = @("LumaCore.dll", "LumaCorePayload.dll", "dwmapi.dll", "xinput1_4.dll") | ForEach-Object { Join-Path "build" (Join-Path $cfg $_) }
+            Compress-Archive -Force -Path $files -DestinationPath "dist\$cfg.zip"
+          }
+          Get-ChildItem dist
+      - name: Create GitHub Release
+        shell: pwsh
+        run: gh release create "${{ steps.version.outputs.tag }}" --target "$env:GITHUB_SHA" --title "LumaCore ${{ steps.version.outputs.tag }}" --generate-notes "dist/Release.zip" "dist/Debug.zip"
