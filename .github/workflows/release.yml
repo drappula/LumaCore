@@ -37,9 +37,16 @@ jobs:
           }
           if ($latest) { echo "Latest release: $latest -> next: V$next" } else { echo "No releases yet -> starting at V$next" }
           "tag=V$next" >> $env:GITHUB_OUTPUT
+      - name: Set up CMake 3.x
+        # Runner images now ship CMake 4.x, which removed compatibility
+        # with <3.5. The pinned deps (protobuf, spdlog) still declare
+        # those floors, so configure fails there. 3.31 builds them fine.
+        uses: lukka/get-cmake@v1
+        with:
+          cmakeVersion: 3.31.6
       - name: Configure (CMake, x64)
         shell: pwsh
-        run: cmake -S source -B build -A x64 -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+        run: cmake -S source -B build -A x64
       - name: Build Release
         shell: pwsh
         run: cmake --build build --config Release --parallel
