@@ -41,9 +41,12 @@ jobs:
         # Runner images now ship CMake 4.x, which removed compatibility
         # with <3.5. The pinned deps (protobuf, spdlog) still declare
         # those floors, so configure fails there. 3.31 builds them fine.
-        uses: lukka/get-cmake@v1
-        with:
-          cmakeVersion: 3.31.6
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-windows-x86_64.zip" -OutFile "$env:RUNNER_TEMP\cmake.zip"
+          Expand-Archive "$env:RUNNER_TEMP\cmake.zip" -DestinationPath "$env:RUNNER_TEMP\cmake"
+          "$env:RUNNER_TEMP\cmake\cmake-3.31.6-windows-x86_64\bin" >> $env:GITHUB_PATH
+          cmake --version
       - name: Configure (CMake, x64)
         shell: pwsh
         run: cmake -S source -B build -A x64
