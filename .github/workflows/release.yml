@@ -77,4 +77,6 @@ jobs:
           Get-ChildItem dist
       - name: Create GitHub Release
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: gh release create "${{ steps.version.outputs.tag }}" --target "$env:GITHUB_SHA" --title "LumaCore ${{ steps.version.outputs.tag }}" --generate-notes "dist/Release.zip" "dist/Debug.zip"
