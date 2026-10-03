@@ -37,16 +37,19 @@ jobs:
           }
           if ($latest) { echo "Latest release: $latest -> next: V$next" } else { echo "No releases yet -> starting at V$next" }
           "tag=V$next" >> $env:GITHUB_OUTPUT
-      - name: Set up CMake 3.x
+      - name: Set up CMake 3.x and Ninja
         # Runner images now ship CMake 4.x, which removed compatibility
         # with <3.5. The pinned deps (protobuf, spdlog) still declare
         # those floors, so configure fails there. 3.31 builds them fine.
+        uses: lukka/get-cmake@latest
+        with:
+          cmakeVersion: 3.31.6
+      - name: Configure (Ninja Multi-Config, x64)
+        # CMake 3.31 predates VS 2026, so its default generator cannot
+        # target it ("Visual Studio 18" is unknown there). Ninja only
+        # needs cl.exe on PATH, which the MSVC step above provides.
         shell: pwsh
-        run: |
-          Invoke-WebRequest -Uri "https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-windows-x86_64.zip" -OutFile "$env:RUNNER_TEMP\cmake.zip"
-          Expand-Archive "$env:RUNNER_TEMP\cmake.zip" -DestinationPath "$env:RUNNER_TEMP\cmake"
-          "$env:RUNNER_TEMP\cmake\cmake-3.31.6-windows-x86_64\bin" >> $env:GITHUB_PATH
-          cmake --version
+        run: cmake -S source -B build -G "Ninja Multi-Config"
       - name: Configure (CMake, x64)
         shell: pwsh
         run: cmake -S source -B build -A x64
