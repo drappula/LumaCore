@@ -27,6 +27,9 @@ jobs:
           # KoriaPolis/LumaCore (currently V36) or existing installs
           # would be "updated" to an older build.
           $latest = gh release list --limit 1 --json tagName --jq '.[0].tagName' 2>$null
+          # gh exits 1 when no releases exist yet; that is expected here.
+          # Reset or pwsh reports the stale native exit code and fails the step.
+          $LASTEXITCODE = 0
           $next = 37
           if (-not [string]::IsNullOrWhiteSpace($latest)) {
             $m = [regex]::Match($latest, '^V(\d+)$')
