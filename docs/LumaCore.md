@@ -6,12 +6,11 @@ This document describes every subsystem in LumaCore, its purpose, the Steam inte
 
 ## Injection chain
 
-Steam loads DLLs from its own directory on startup.  LumaCore exploits this by placing two thin proxy DLLs alongside `steam.exe`:
+Steam loads DLLs from its own directory on startup.  LumaCore exploits this by placing a thin proxy DLL alongside `steam.exe`:
 
-- `dwmapi.dll` — forwards the full DWM API surface and loads `LumaCore.dll` on attach
-- `xinput1_4.dll` — forwards XInput 1.4 exports; acts as a backup load gate, calling `LoadLibraryA("LumaCore.dll")` on process attach as well
+- `xinput1_4.dll` — forwards XInput 1.4 exports and loads `LumaCore.dll` from a worker thread after DllMain
 
-When Steam starts, Windows loads the proxy DLLs before any game code runs.  The proxy's `DllMain` loads `LumaCore.dll` and returns.
+When Steam starts, Windows loads the proxy DLL before any game code runs.  The proxy's `DllMain` loads `LumaCore.dll` and returns.
 
 `LumaCore.dll` then:
 

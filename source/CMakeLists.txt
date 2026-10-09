@@ -197,13 +197,8 @@ target_compile_definitions(LumaCorePayload PRIVATE
     $<$<CONFIG:Debug>:LUMACORE_PAYLOAD_LOGGING_ENABLED>
 )
 
-add_library(dwmapi SHARED
-    proxy/LcDwmProxy.cpp
-)
-set_target_properties(dwmapi PROPERTIES PREFIX "" OUTPUT_NAME "dwmapi")
-
 # ---------------------------------------------------------------------------
-# xinput1_4.dll hijack — secondary loader DLL placed alongside Steam.
+# xinput1_4.dll hijack — the loader DLL placed alongside Steam.
 # ---------------------------------------------------------------------------
 add_library(xinput1_4 SHARED
     proxy/LcXInputProxy.cpp

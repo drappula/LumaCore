@@ -59,19 +59,19 @@ jobs:
       - name: Verify DLLs
         shell: pwsh
         run: |
-          foreach ($dll in @("LumaCore.dll", "LumaCorePayload.dll", "dwmapi.dll", "xinput1_4.dll")) {
+          foreach ($dll in @("LumaCore.dll", "LumaCorePayload.dll", "xinput1_4.dll")) {
             foreach ($cfg in @("Release", "Debug")) {
               $p = Join-Path "build" (Join-Path $cfg $dll)
               if (-not (Test-Path -LiteralPath $p)) { throw "Missing $p" }
             }
           }
-          echo "All 4 DLLs present in both configs."
+          echo "All 3 DLLs present in both configs."
       - name: Pack artifacts
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
           foreach ($cfg in @("Release", "Debug")) {
-            $files = @("LumaCore.dll", "LumaCorePayload.dll", "dwmapi.dll", "xinput1_4.dll") | ForEach-Object { Join-Path "build" (Join-Path $cfg $_) }
+            $files = @("LumaCore.dll", "LumaCorePayload.dll", "xinput1_4.dll") | ForEach-Object { Join-Path "build" (Join-Path $cfg $_) }
             Compress-Archive -Force -Path $files -DestinationPath "dist\$cfg.zip"
           }
           Get-ChildItem dist

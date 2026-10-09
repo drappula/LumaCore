@@ -2,16 +2,15 @@
 
 LumaCore is the DLL component that SteaMidra injects into Steam to handle family-sharing bypass, depot key loading, achievement spoofing, Denuvo authorization, and legacy CD-key suppression.
 
-It ships as four files placed in the Steam installation directory:
+It ships as three files placed in the Steam installation directory:
 
-- `xinput1_4.dll` — thin XInput 1.4 proxy; PRIMARY bootstrap. Loads LumaCore.dll from a worker thread after DllMain (Aether 14a6359 lesson: XInput is the only startup gate Steam still loads from its own directory)
-- `dwmapi.dll` — thin DWM proxy; legacy/secondary gate, same safe worker-thread load
+- `xinput1_4.dll` — thin XInput 1.4 proxy; loads LumaCore.dll from a worker thread after DllMain (Aether 14a6359 lesson: XInput is the startup gate Steam still loads from its own directory)
 - `LumaCore.dll` — the main hook library
 - `LumaCorePayload.dll` — injected into game processes for online-fix multiplayer (EOS bridge, lobby redirection)
 
 ## How it works
 
-At Steam startup, the proxy DLLs load before any game code and load `LumaCore.dll`.  LumaCore then:
+At Steam startup, the proxy DLL loads before any game code and loads `LumaCore.dll`.  LumaCore then:
 
 1. Copies `steamclient64.dll` to `bin\lcoverlay.dll` so it can be loaded and hooked independently of the live client.
 2. Reads the current Steam build ID from `steam.exe!GetBootstrapperVersion` so byte-pattern searches pick the most accurate signature for the running build.
