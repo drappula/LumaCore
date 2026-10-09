@@ -26,16 +26,40 @@ jobs:
           # as "update available", so this repo must stay above upstream
           # KoriaPolis/LumaCore (currently V36) or existing installs
           # would be "updated" to an older build.
-          $latest = gh release list --limit 1 --json tagName --jq '.[0].tagName' 2>$null
-          # gh exits 1 when no releases exist yet; that is expected here.
+          # NOTE: a failed `gh release list` must fail this step, never
+          # silently default to V37 (that collided with the real V37 once
+          # when the API call hiccuped and stderr was swallowed).
+          $errFile = Join-Path $env:RUNNER_TEMP "gh-releases.err"
+          $tags = gh release list --limit 30 --json tagName --jq '.[].tagName' 2>$errFile
+          if ($LASTEXITCODE -ne 0) {
+            $err = Get-Content $errFile -Raw -ErrorAction SilentlyContinue
+            if ([string]::IsNullOrWhiteSpace($tags) -and $err -match 'no releases|Could not resolve|404') {
+              echo "No releases yet -> starting at V37"
+              "tag=V37" >> $env:GITHUB_OUTPUT
+              $LASTEXITCODE = 0
+              exit 0
+            }
+            Write-Error "gh release list failed; refusing to guess next tag: $err"
+            exit 1
+          }
+          $max = 36
+          foreach ($o in @($tags)) {
+            foreach ($t in ($o -split '\r?\n')) {
+              $m = [regex]::Match($t.Trim(), '^V(\d+)$')
+              if ($m.Success) {
+                $n = [int]$m.Groups[1].Value
+                if ($n -gt $max) { $max = $n }
+              }
+            }
+          }
+          $next = $max + 1
+          while (gh release view "V$next" --json tagName --jq '.tagName' 2>$null) {
+            echo "Tag V$next already exists, trying next"
+            $next++
+          }
           # Reset or pwsh reports the stale native exit code and fails the step.
           $LASTEXITCODE = 0
-          $next = 37
-          if (-not [string]::IsNullOrWhiteSpace($latest)) {
-            $m = [regex]::Match($latest, '^V(\d+)$')
-            if ($m.Success) { $next = [int]$m.Groups[1].Value + 1 }
-          }
-          if ($latest) { echo "Latest release: $latest -> next: V$next" } else { echo "No releases yet -> starting at V$next" }
+          echo "Next tag: V$next"
           "tag=V$next" >> $env:GITHUB_OUTPUT
       - name: Set up CMake 3.x and Ninja
         # Runner images now ship CMake 4.x, which removed compatibility
