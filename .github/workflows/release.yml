@@ -21,6 +21,8 @@ jobs:
       - name: Compute next version
         id: version
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           # Tags look like V36, V37, ... SteaMidra treats any tag mismatch
           # as "update available", so this repo must stay above upstream
