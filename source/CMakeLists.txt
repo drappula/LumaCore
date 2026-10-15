@@ -93,6 +93,7 @@ add_library(LumaCore SHARED
     runtime/RuntimeHttp.cpp
     runtime/ManifestCache.cpp
     runtime/ManifestFetch.cpp
+    runtime/ManifestDonor.cpp
     runtime/ProtectionProbe.cpp
     runtime/RemoteTools.cpp
     runtime/IpcSpecLoader.cpp

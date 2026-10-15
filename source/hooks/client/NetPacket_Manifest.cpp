@@ -7,6 +7,7 @@
 #include "hooks/client/ManifestBind.h"
 #include "config/LuaLoader.h"
 #include "runtime/ManifestCache.h"
+#include "runtime/ManifestDonor.h"
 #include "runtime/ManifestFetch.h"
 #include "runtime/Logger.h"
 
@@ -29,18 +30,26 @@ bool HandleSend(const uint8_t* pBody, uint32_t cbBody,
     const uint64_t gid    = req.manifest_id();
     const AppId_t appId   = req.has_app_id() ? req.app_id() : 0;
 
-    if (!LuaLoader::HasDepot(depotId)) {
-        LOG_PKTRT_DEBUG("{{\"evt\":\"DepotFallback\",\"act\":\"send\",\"skip\":\"not-in-addappid\",\"depot\":{},\"gid\":{}}}",
-                   depotId, gid);
-        return false;
-    }
-
     CMsgProtoBufHeader hdr;
     if (!hdr.ParseFromArray(pHdr, cbHdr) || !hdr.has_jobid_source()) {
         LOG_PKTRT_WARN("{{{{\"evt\":\"DepotFallback\",\"act\":\"send\",\"err\":\"no-jobid\"}}}}");
         return false;
     }
     const uint64_t jobId = hdr.jobid_source();
+
+    // Donor passive capture: remember EVERY outgoing code request while
+    // enabled — not just Lua depots, genuine codes from actually-downloaded
+    // depots are the valuable ones. Placed before the HasDepot and
+    // owned-bypass early-returns below so those paths still record (the
+    // bypass path receives a genuine code worth donating). No-op when
+    // [donate] is disabled.
+    ManifestDonor::NoteSent(jobId, depotId, gid);
+
+    if (!LuaLoader::HasDepot(depotId)) {
+        LOG_PKTRT_DEBUG("{{\"evt\":\"DepotFallback\",\"act\":\"send\",\"skip\":\"not-in-addappid\",\"depot\":{},\"gid\":{}}}",
+                   depotId, gid);
+        return false;
+    }
 
     // Owned-depot bypass: BuildDepotDependency recorded what Steam itself
     // believes for this depot. When it belongs to an app the account owns,
@@ -92,6 +101,22 @@ void HandleRecv(const uint8_t* pHdr, uint32_t cbHdr,
         return;
     }
     const uint64_t jobId = hdr.jobid_target();
+
+    // Donor passive capture: harvest the genuine code from the UNPATCHED
+    // reply before the injection path below can rewrite the body. Only
+    // real successes for a request tracked by NoteSent on send; the
+    // injected (non-owned) case filters out here because Steam's own reply
+    // carries eresult != OK or no valid code. Runs before Resolve so the
+    // early-return no-resolve path still donates. No-op when [donate] is
+    // disabled.
+    if (hdr.eresult() == static_cast<int32_t>(k_EResultOK)) {
+        CContentServerDirectory_GetManifestRequestCode_Response donorResp;
+        if (donorResp.ParseFromArray(pBody, cbBody) &&
+            donorResp.has_manifest_request_code() &&
+            donorResp.manifest_request_code() != 0) {
+            ManifestDonor::NoteRecvOk(jobId, donorResp.manifest_request_code());
+        }
+    }
 
     auto resolved = ManifestFetch::Resolve(jobId);
     if (!resolved) {
