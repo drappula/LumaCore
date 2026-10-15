@@ -89,7 +89,13 @@ namespace {
 
 namespace RuntimeHttp {
 
-Response Get(std::string_view url, std::wstring_view userAgent) {
+namespace {
+
+// Shared WinHTTP GET path. bodyCap bounds the accumulated body;
+// recvTimeoutMs overrides only the receive timeout, resolve/connect/
+// send keep kTimeoutMs.
+Response GetImpl(std::string_view url, std::wstring_view userAgent,
+                 std::size_t bodyCap, DWORD recvTimeoutMs) {
     Response r;
     Url parsed;
     if (!Parse(url, parsed)) {
@@ -106,7 +112,7 @@ Response Get(std::string_view url, std::wstring_view userAgent) {
         r.diagnostic = "WinHttpOpen failed";
         return r;
     }
-    WinHttpSetTimeouts(session, kTimeoutMs, kTimeoutMs, kTimeoutMs, kTimeoutMs);
+    WinHttpSetTimeouts(session, kTimeoutMs, kTimeoutMs, kTimeoutMs, recvTimeoutMs);
 
     WinHandle conn(WinHttpConnect(session, parsed.host.c_str(), parsed.port, 0));
     if (!conn) {
@@ -166,7 +172,7 @@ Response Get(std::string_view url, std::wstring_view userAgent) {
                 break;
             }
             if (got == 0) { avail = 0; break; }
-            if (r.body.size() + got > kBodyCap) {
+            if (r.body.size() + got > bodyCap) {
                 r.diagnostic = "body cap reached";
                 r.body.clear();
                 r.networkError = true;
@@ -180,6 +186,26 @@ Response Get(std::string_view url, std::wstring_view userAgent) {
     }
 
     return r;
+}
+
+} // namespace
+
+Response Get(std::string_view url, std::wstring_view userAgent) {
+    return GetImpl(url, userAgent, kBodyCap, kTimeoutMs);
+}
+
+Response GetLarge(std::string_view url, std::wstring_view userAgent,
+                  uint32_t maxBytes, uint32_t recvTimeoutMs) {
+    if (maxBytes == 0) {
+        Response r;
+        r.diagnostic = "maxBytes must be non-zero";
+        return r;
+    }
+    if (recvTimeoutMs == 0) {
+        recvTimeoutMs = kTimeoutMs;
+    }
+    return GetImpl(url, userAgent, static_cast<std::size_t>(maxBytes),
+                   static_cast<DWORD>(recvTimeoutMs));
 }
 
 Response Post(std::string_view url, std::string_view body,
