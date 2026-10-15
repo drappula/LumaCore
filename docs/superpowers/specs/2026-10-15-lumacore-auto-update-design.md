@@ -45,12 +45,15 @@ Denuvo/ticket/stats paths.
   Lua-tracked depots, covering workshop items that never pass through
   `BuildDepotDependency`. The pattern entry must be published through
   LumaCore's existing pattern chain (Steam-Auto-PT `pattern` branch +
-  jsDelivr + local cache); until it exists the hook stays uninstalled
-  and the send-path pre-seed still covers non-workshop cases.
+  jsDelivr + local cache); until it exists the hook is skipped through
+  the normal pattern-miss path (`status.json` miss, Steam runs that
+  function unmodified) and the send-path pre-seed still covers
+  non-workshop cases.
 - Extend `source/hooks/client/NetPacket_Manifest.cpp` send path: detached
-  `EnsureCached` pre-seed for the exact requested gid (bypass negative
-  cache only while an active download runs, reusing LumaCore's SteamUI
-  download-state signal) + existing async code fetch
+  `EnsureCached` pre-seed for the exact requested gid with
+  `bypassNegativeCache=false` always (v1: no download-activity signal
+  exists yet, so scheduled-update retries ride the negative cache
+  instead of hammering the archive) + existing async code fetch
   joined by jobid. Recv path: patch `eresult=OK` + fetched code, except
   depots belonging to owned apps (leave Steam's genuine code alone).
 - Add donor module (`ManifestDonor`): passive capture of genuine codes
@@ -69,8 +72,10 @@ Denuvo/ticket/stats paths.
 3. Outgoing `GetManifestRequestCode` fires detached cache fill + async
    provider fetch; incoming reply is patched with the fetched code
    (owned depots untouched).
-4. 404s enter the negative cache and, during active downloads only,
-   feed one debounced missing-manifest notice for the batch.
+4. 404s enter the negative cache and feed one debounced,
+    once-per-(depot,gid)-per-session missing-manifest notice for the
+    batch (fired from both pre-seed call sites whenever the archive
+    reports a definitive 404, regardless of download state).
 5. Donor separately harvests genuine codes and mints wanted-list codes
    for upload; disabled state produces zero extra traffic.
 
@@ -98,8 +103,9 @@ Denuvo/ticket/stats paths.
   (retried promptly, never cached as missing).
 - Owned-depot bypass via the seen-map avoids replacing working Steam
   codes with carrier-minted ones (CDN 401 cause).
-- Donor uploads only depots Steam requested and the account owns; no
-  library enumeration.
+- Donor uploads only codes Steam actually granted — the reply is the
+  ownership oracle (a refused mint reports nothing); no library
+  enumeration.
 - Disk writes validated (size + magic) and atomic; concurrent fetches
   deduped; per-cycle and per-session mint caps bound Steam traffic.
 
@@ -112,7 +118,7 @@ Denuvo/ticket/stats paths.
   workshop item; pinned depot frozen; owned depot uses Steam code;
   restart mid-refresh does not instant-complete; donor-off means no
   uploads.
-- Observability: `manifest.log` / `manbnd.log` / `netpacket.log` for
+- Observability: `manifest.log` / `manbnd.log` / `pktrt.log` for
   pre-seed hit/miss, provider shape, injection, mints; `status.json`
   for hook misses.
 

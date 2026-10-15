@@ -185,18 +185,41 @@ When Steam spawns a manual `-onlinefix` game process, the CreateProcess hook cla
 
 ---
 
-### Manifest Bind & Fetch (`hooks/client/ManifestBind.cpp` + `runtime/ManifestFetch.cpp`)
+### Manifest Bind & Fetch (`hooks/client/ManifestBind.cpp` + `runtime/ManifestFetch.cpp` + `runtime/ManifestCache.cpp` + `hooks/client/NetPacket_Manifest.cpp` + `runtime/ManifestDonor.cpp`)
 
-Manifest download bridge with HTTPS-first URL chain fallback.
+Automatic game updates with HTTPS-first URL chain fallback, depotcache pre-seed, and optional donor contribution.
 
-When Steam requests a depot manifest (gid) and the original call fails with a network error, the bridge tries a chain of mirror URLs with `{gid}` substituted into the path. The first server that returns HTTP 200 wins; the response body is written into Steam's internal buffer as if the original call succeeded. Trusted host checking prevents redirects to unexpected domains.
+**Request-code bridge.** When Steam requests a depot manifest (gid) for a Lua-tracked depot and the original call fails, the bridge resolves a manifest request code through this provider chain, first hit wins:
+
+1. Lua `fetch_manifest_code_ex(appId, depotId, gid)` when the script defines it.
+2. Lua `fetch_manifest_code(gid)` (legacy gid-only form).
+3. The configured `[manifest_fetch] urls` chain, tried in order until one returns HTTP 200 with a parseable body. A single 429 gets one retry after 750 ms; network errors, non-200 statuses, and unparseable bodies demote that provider for this lookup and fall through to the next.
 
 Default URL chain (HTTPS first, HTTP as last resort):
-1. `https://manifest.opensteamtool.com/{gid}`
+1. `https://manifest.opensteamtool.com/{appid}/{depotid}/{gid}`
 2. `https://manifest.steam.run/api/manifest/{gid}`
 3. `http://gmrc.wudrm.com/manifest/{gid}`
 
-The first built-in provider is fetched with its required compatibility User-Agent internally. Custom URLs and the other fallback providers keep LumaCore's normal runtime HTTP User-Agent.
+`{gid}`, `{appid}`, and `{depotid}` are substituted per request; `{gid}`-only templates keep working. The first built-in provider is fetched with its required compatibility User-Agent internally. Custom URLs and the other fallback providers keep LumaCore's normal runtime HTTP User-Agent. Response bodies parse as either a plain decimal string or a JSON object with a `"content"`, `"code"`, or `"manifest_request_code"` digit-string field (`"manifest_request_code"` wins when several are present). Trusted host checking rejects responses that redirect to unexpected domains. Concurrent lookups for the same gid dedupe onto one in-flight fetch; resolved codes are cached per session. The recv handler waits up to `[manifest_fetch] timeout_sec` (default 12 s) for the lookup and, on success, patches `eresult=OK` plus the fetched code into Steam's reply; on timeout or total failure the original reply passes through untouched.
+
+**Depot-aware shape note.** Valve enforces depot-bound codes: a gid-only request for a non-carrier depot yields a code the CDN rejects with 401. Templates containing `{appid}` or `{depotid}` produce the depot-aware `app/depot/gid` form (logged as `shape=app/depot/gid`); templates without them log `shape=gid-only`. The first default provider is depot-aware; keep it first unless a mirror needs otherwise. `appId` may legitimately be 0 (Steam sometimes omits it); `depotId` must be right, so it is passed through verbatim.
+
+**Depotcache pre-seed.** Before any request code is needed, `ManifestCache::EnsureCached` fetches the exact archived manifest from the baked-in archive (`https://manifest.luastools.xyz/m/<depotId>/<gid>`, infrastructure — not a config knob) and drops it into `<Steam>\depotcache\<depotId>_<gid>.manifest`. Steam's own disk check then succeeds and no request code is needed at all. Writes are atomic (temp file beside the target + `MoveFileExA` rename), bodies are validated (minimum 16 bytes, payload magic `71F617D0` at the head, EOF magic `32C415AB` at the tail) and capped at 64 MB, and concurrent fetches of the same depot:gid dedupe. A definitive 404 (manifest not archived yet) enters a 10-minute in-process negative cache so scheduled-update retries do not re-GET a known miss; a Steam restart clears it, so a manifest a donor supplies later is still picked up. Timeouts and other transient failures are never negative-cached. Both pre-seed call sites currently pass `bypassNegativeCache=false` always — there is no download-activity signal yet, so retries ride the negative cache instead of hammering the archive. A 404 also feeds one debounced missing-manifest notice per (depot,gid) per session: the depots are batched over a 3 s quiet window into a single MessageBox (`manbnd.log` records each queueing as `manifest depot={} gid={} not archived yet (404)`).
+
+Pre-seed fires from two places: the `YldLoadDepotManifest` hook (bounded blocking, ≤5 s, for Lua-tracked depots — this also covers workshop items, where depot == appid, which never pass through `BuildDepotDependency`) and the `GetManifestRequestCode` send path (detached worker thread, never blocks Steam's net thread, plus the async code fetch joined by jobid).
+
+**Owned-depot bypass.** `BuildDepotDependency` records every depot→(app,gid) Steam itself reports, before pin overrides are applied. When an outgoing code request belongs to an app the account genuinely owns, the send path skips fetch injection entirely and leaves Steam's own code alone — replacing a working Steam code with a carrier-minted one causes CDN 401s. Depots Steam never saw this session, or belonging to unowned apps, take the fetch path. Requests for depots outside the Lua config are ignored outright.
+
+**Transient 0-depot guard.** Steam reports zero depots for an app during the window where its appinfo is being swapped in by a PICS refresh. Acting on that transient writes an empty depot config and the install silently "completes" having downloaded nothing. For Lua-managed apps only, the hook returns false for a 0-depot result so Steam keeps its previous depot config and the next pass builds it properly (`manbnd.log`: `returned 0 depots (appinfo mid-refresh)`).
+
+**Donor behavior + opt-out.** Behind `[donate]` (default `enabled=true`; `enabled=false` opts out fully — zero extra traffic: no HTTP, no probes, capture functions return immediately). Two independent paths, both upload-only and never on Steam threads:
+
+- *Passive capture*: every outgoing code request is remembered by jobid; when the matching unpatched reply carries `eresult=OK` with a nonzero code, the (depot,gid,code) triple is POSTed to the archive immediately on a detached worker. Captured codes are free (already minted by a real download), so no existence probe precedes the upload; the code itself is never logged. Only depots actually downloaded are ever reported — the rest of the library is never uploaded.
+- *Active minting*: a worker loop pulls the wanted list (`GET <archive>/manifestwanted`, `app:depot:gid` lines, refreshed every `wanted_refresh_secs`, shuffled each refresh so donors do not march in lockstep), skips entries already archived (free HEAD probe), and originates `ContentServerDirectory.GetManifestRequestCode#1` frames for the rest through a borrowed send context, within `max_mints_per_cycle` per cycle (default 25), `min_mint_interval_ms` between calls (default 2000 — the real rate cap), `max_mints_per_session` total (default 0 = unlimited), 30 s per-probe timeout, `interval_secs` rest between cycles (default 30). Ownership is not pre-gated (LumaCore has no license enumeration); Steam's reply is the ownership oracle — refused mints report nothing and only granted codes are batch-submitted at cycle end, since codes rotate within minutes. When the wanted list sends `app_id` 0, the seen-map supplies a real app id when one is known (bare 0 has been observed to draw `eresult=8 InvalidParam` on owned depots). The loop idles with zero traffic until the TX hook has captured a send context (i.e. Steam is connected); toggling `[donate]` takes effect without a restart.
+
+**Pin semantics.** `setManifestid(depot, gid)` freezes that depot: the pinned gid is patched into the depot config Steam built, so every downstream step (pre-seed, code fetch, download) targets the pinned gid. Unpinned depots track Steam's latest. `manbnd.log` records each override as `manifest-override depot={} gid={}->{} size={}->{}` and each untouched depot as `manifest-scan ...`.
+
+**Log pointers.** `manifest.log`: pre-seed hits (`ManifestCache: cached app={} depot={} gid={} ...`), misses (`ManifestCache: miss ... status=404`), provider shape + resolution (`ManifestFetch: gid={} provider ... shape=...`, `resolved code=... via provider ...`), donor submits/mints/cycle summaries, probe send/recv. `manbnd.log`: `BuildDepotDependency` events, `manifest-map-dump` + `manifest-map-entry`, overrides/scans, `YldLoadDepotManifest: pre-seed ...`, 0-depot guard warnings, missing-manifest queueing. `pktrt.log`: `DepotFallback` send/recv JSON events (`bypass:owned`, `skip:not-in-addappid`, `skip:no-resolve`, patched `code`). `status.json`: hook misses (e.g. a missing `YldLoadDepotManifest` pattern entry skips that hook while everything else works).
 
 ---
 
