@@ -418,8 +418,19 @@ void CaptureSendContext(void* ws, SendFrameFn send,
     std::lock_guard<std::mutex> lock(g_probeLock);
     if (ws)   g_ws   = ws;
     if (send) g_send = send;
-    if (g_hdrTemplate.empty() && hdr && hdrLen)
-        g_hdrTemplate.assign(hdr, hdr + hdrLen);
+    if (!hdr || !hdrLen) return;
+    // Parse-validate with the same protobuf parse the request path uses
+    // before storing: an unparseable candidate is dropped (keeping the
+    // previous good template, or staying empty) instead of poisoning all
+    // future probes. The latest valid capture always wins, so a reconnect
+    // refreshes steamid/session routing instead of going stale.
+    CMsgProtoBufHeader candidate;
+    if (!candidate.ParseFromArray(hdr, static_cast<int>(hdrLen))) {
+        LOG_MANIFESTCH_DEBUG("ManifestProbe: ignoring unparseable header template ({} bytes)",
+                             hdrLen);
+        return;
+    }
+    g_hdrTemplate.assign(hdr, hdr + hdrLen);
 }
 
 std::future<uint64_t> Request(uint32_t appId, uint32_t depotId, uint64_t gid) {
