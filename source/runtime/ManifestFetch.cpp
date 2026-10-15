@@ -175,9 +175,17 @@ namespace {
         for (size_t i = 0; i < chain.size(); ++i) {
             const std::string& tmpl = chain[i];
             if (tmpl.empty()) continue;
+            // Depot-bound codes: a gid-only request for a non-carrier depot
+            // yields a code the CDN rejects with 401. Tag the shape so
+            // operators can see which form was used. BST rule preserved:
+            // appId may be 0, depotId must be right (both passed through
+            // verbatim to ExpandTemplate below).
+            const bool depotAware = tmpl.find("{appid}") != std::string::npos ||
+                                    tmpl.find("{depotid}") != std::string::npos;
             std::string url = ExpandTemplate(tmpl, gid, appId, depotId);
-            LOG_MANIFESTCH_INFO("ManifestFetch: gid={} provider {}/{} GET {}",
-                                gid, i + 1, chain.size(), url);
+            LOG_MANIFESTCH_INFO("ManifestFetch: gid={} provider {}/{} GET {} shape={}",
+                                gid, i + 1, chain.size(), url,
+                                depotAware ? "app/depot/gid" : "gid-only");
 
             RuntimeHttp::Response resp{};
             for (int attempt = 0; attempt < 2; ++attempt) {
