@@ -46,6 +46,11 @@ namespace RuntimeHttp {
     // extraHeaders are raw "Header: value" strings appended to the request.
     Response Post(std::string_view url, std::string_view body,
                   const std::vector<std::string>& extraHeaders = {});
+
+    // Single-shot HTTP/HTTPS HEAD. Returns the status code with an empty
+    // body (nothing is read past the response headers); used for cheap
+    // existence probes. True ONLY on transport success — check status.
+    Response Head(std::string_view url);
 }
 
 #endif

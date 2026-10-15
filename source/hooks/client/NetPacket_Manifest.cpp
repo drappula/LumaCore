@@ -102,6 +102,21 @@ void HandleRecv(const uint8_t* pHdr, uint32_t cbHdr,
     }
     const uint64_t jobId = hdr.jobid_target();
 
+    // Active-probe replies (Task 8) are consumed here first: originated
+    // frames bypass the TX hook, so HandleSend never saw them and neither
+    // the donor-capture below nor ManifestFetch has an entry for them.
+    // The explicit IsProbeJobId guard after that covers even untracked
+    // (stale, timed-out) probe-range jobids, so no originated reply can
+    // ever be mistaken for a real Steam reply. Real Steam jobids count up
+    // from small values and can never reach the probe range.
+    if (ManifestDonor::HandleProbeRecv(pBody, cbBody, pHdr, cbHdr))
+        return;
+    if (ManifestDonor::IsProbeJobId(jobId)) {
+        LOG_PKTRT_DEBUG("{{\"evt\":\"DepotFallback\",\"act\":\"recv\",\"skip\":\"stale-probe-job\",\"job\":{}}}",
+                   jobId);
+        return;
+    }
+
     // Donor passive capture: harvest the genuine code from the UNPATCHED
     // reply before the injection path below can rewrite the body. Only
     // real successes for a request tracked by NoteSent on send; the

@@ -18,6 +18,7 @@
 #include "config/LuaLoader.h"
 #include "runtime/Ticket.h"
 #include "runtime/ManifestFetch.h"
+#include "runtime/ManifestDonor.h"
 #include "hooks/capture/SteamCapture.h"
 #include "runtime/LcFnvHash.h"
 #include "hooks/Macros.h"
@@ -102,6 +103,10 @@ static void RouteOutboundDispatch(EMsg eMsg, const uint8_t* pBody, uint32_t cbBo
         if (hdr.ParseFromArray(pHdr, cbHdr) && hdr.has_target_job_name()) {
             NetPacket::s_tx.PatchBody = RouteTxService(hdr.target_job_name().c_str(), pBody, cbBody, pHdr, cbHdr);
         }
+        // Probe send-context: keep one real outbound header as the
+        // template for originated frames (BST CaptureContext pattern).
+        // Unconditional — the template is routing state, not content.
+        ManifestDonor::CaptureSendContext(nullptr, nullptr, pHdr, cbHdr);
         return;
     }
     case k_EMsgClientPICSProductInfoRequest:
@@ -372,6 +377,12 @@ LM_HOOK(BBuildAndAsyncSendFrame, bool,
     if (eWebSocketOpCode != k_eWebSocketOpCode_Binary)
         return oBBuildAndAsyncSendFrame(pObject, eWebSocketOpCode, pubData, cubData);
 
+    // Probe send-context: the websocket object + trampoline are only
+    // visible here. Captured on every binary frame so a reconnect is
+    // tracked rather than going stale (BST CaptureContext pattern).
+    ManifestDonor::CaptureSendContext(pObject, oBBuildAndAsyncSendFrame,
+                                      nullptr, 0);
+
     EMsg eMsg;
     const uint8_t *pHdr, *pBody;
     uint32_t cbHdr, cbBody;
@@ -498,9 +509,15 @@ void Install() {
     LM_INSTALL(BBuildAndAsyncSendFrame);
     LM_INSTALL(RecvPkt);
     LM_TX_COMMIT();
+    // Donor loop shares the hooks' lifetime: the probe needs the TX hook
+    // installed, and stopping here guarantees no originated frame can
+    // outlive the send path. Started even when [donate] is disabled — the
+    // worker idles with zero traffic until it is enabled.
+    ManifestDonor::Start();
 }
 
 void Uninstall() {
+    ManifestDonor::Stop();
     LM_TX_BEGIN();
     LM_REMOVE(BBuildAndAsyncSendFrame);
     LM_REMOVE(RecvPkt);

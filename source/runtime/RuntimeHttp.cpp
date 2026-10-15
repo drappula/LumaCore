@@ -316,4 +316,59 @@ Response Post(std::string_view url, std::string_view body,
     return r;
 }
 
+Response Head(std::string_view url) {
+    Response r;
+    Url parsed;
+    if (!Parse(url, parsed)) {
+        r.diagnostic = "url parse failed";
+        return r;
+    }
+
+    WinHandle session(WinHttpOpen(L"LumaCore-RuntimeHttp/1.0",
+                                  WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                                  WINHTTP_NO_PROXY_NAME,
+                                  WINHTTP_NO_PROXY_BYPASS, 0));
+    if (!session) {
+        r.diagnostic = "WinHttpOpen failed";
+        return r;
+    }
+    WinHttpSetTimeouts(session, kTimeoutMs, kTimeoutMs, kTimeoutMs, kTimeoutMs);
+
+    WinHandle conn(WinHttpConnect(session, parsed.host.c_str(), parsed.port, 0));
+    if (!conn) {
+        r.diagnostic = "WinHttpConnect failed";
+        return r;
+    }
+
+    DWORD reqFlags = parsed.https ? WINHTTP_FLAG_SECURE : 0u;
+    WinHandle req(WinHttpOpenRequest(conn, L"HEAD", parsed.pathAndQuery.c_str(),
+                                     nullptr, WINHTTP_NO_REFERER,
+                                     WINHTTP_DEFAULT_ACCEPT_TYPES, reqFlags));
+    if (!req) {
+        r.diagnostic = "WinHttpOpenRequest failed";
+        return r;
+    }
+
+    if (!WinHttpSendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                            WINHTTP_NO_REQUEST_DATA, 0, 0, 0)
+        || !WinHttpReceiveResponse(req, nullptr))
+    {
+        r.diagnostic = "send/receive err=" + std::to_string(GetLastError());
+        return r;
+    }
+
+    DWORD status = 0;
+    DWORD statusSize = sizeof(status);
+    if (!WinHttpQueryHeaders(req,
+                             WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                             WINHTTP_HEADER_NAME_BY_INDEX, &status,
+                             &statusSize, WINHTTP_NO_HEADER_INDEX)) {
+        r.diagnostic = "status query failed";
+        return r;
+    }
+    r.status = static_cast<int>(status);
+    r.networkError = false;
+    return r;
+}
+
 } // namespace RuntimeHttp
