@@ -198,6 +198,7 @@ Response GetLarge(std::string_view url, std::wstring_view userAgent,
                   uint32_t maxBytes, uint32_t recvTimeoutMs) {
     if (maxBytes == 0) {
         Response r;
+        r.networkError = true;
         r.diagnostic = "maxBytes must be non-zero";
         return r;
     }

@@ -36,9 +36,9 @@ namespace RuntimeHttp {
     // Single-shot HTTP/HTTPS GET for manifest-size bodies. Same WinHTTP
     // path as Get, but the body cap is caller-supplied via maxBytes
     // (e.g. 64 MiB for Steam manifests) and the receive timeout is
-    // caller-supplied via recvTimeoutMs (e.g. 60 s); resolve, connect,
-    // and send keep the standard 12 s budget. Existing Get behavior
-    // is unchanged.
+    // caller-supplied via recvTimeoutMs (e.g. 60 s, 0 falls back to
+    // 12 s); resolve, connect, and send keep the standard 12 s budget.
+    // Existing Get behavior is unchanged.
     Response GetLarge(std::string_view url, std::wstring_view userAgent,
                       uint32_t maxBytes, uint32_t recvTimeoutMs);
 
