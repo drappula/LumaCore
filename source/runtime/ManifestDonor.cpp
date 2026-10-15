@@ -23,6 +23,7 @@
 #include <map>
 #include <mutex>
 #include <random>
+#include <set>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -136,6 +137,49 @@ namespace {
     std::vector<Wanted> g_wantedCache;
     std::chrono::steady_clock::time_point g_wantedFetchedAt{};
     std::mutex g_wantedLock;
+
+    // ── Skip caches: bound per-cycle work ──────────────────────────
+    //
+    // Without these, `minted >= maxPerCycle` counts only successful mints,
+    // so an account owning few listed depots walks the entire wanted list
+    // every cycle and re-probes known refusals forever, while HEAD-200
+    // positives are re-HEADed although archive membership is monotonic.
+    // Archive positives are remembered for the session (monotonic: once
+    // archived, always archived). Refusals are remembered with a long TTL:
+    // Steam's reply stays the ownership oracle — only an ANSWERED refusal
+    // is cached, never a timeout — while the TTL self-heals if ownership
+    // later changes. Both are consulted before any HEAD or probe.
+    using DepotGid = std::pair<uint32_t, uint64_t>;
+    std::set<DepotGid> g_archivedKnown;
+    std::map<DepotGid, std::chrono::steady_clock::time_point> g_refusedAt;
+    std::mutex g_skipLock;
+    constexpr auto kRefusedTtl = std::chrono::hours(24);
+
+    bool IsKnownArchived(uint32_t depot, uint64_t gid) {
+        std::lock_guard<std::mutex> lock(g_skipLock);
+        return g_archivedKnown.count(DepotGid{depot, gid}) > 0;
+    }
+
+    void RememberArchived(uint32_t depot, uint64_t gid) {
+        std::lock_guard<std::mutex> lock(g_skipLock);
+        g_archivedKnown.emplace(depot, gid);
+    }
+
+    bool IsKnownRefused(uint32_t depot, uint64_t gid) {
+        std::lock_guard<std::mutex> lock(g_skipLock);
+        auto it = g_refusedAt.find(DepotGid{depot, gid});
+        if (it == g_refusedAt.end()) return false;
+        if (std::chrono::steady_clock::now() - it->second >= kRefusedTtl) {
+            g_refusedAt.erase(it);   // lazy expiry on read
+            return false;
+        }
+        return true;
+    }
+
+    void RememberRefused(uint32_t depot, uint64_t gid) {
+        std::lock_guard<std::mutex> lock(g_skipLock);
+        g_refusedAt[DepotGid{depot, gid}] = std::chrono::steady_clock::now();
+    }
 
     // The wanted list is served whole and edge-cached: raise the body cap
     // far above the 8 MiB default so a large list is never silently
@@ -280,7 +324,7 @@ namespace {
         if (wanted.empty()) return;
 
         std::string body;
-        size_t minted = 0, cached = 0, refused = 0;
+        size_t minted = 0, cached = 0, refused = 0, skipped = 0;
         bool attempted = false;   // has any mint been attempted yet this cycle?
 
         for (const Wanted& w : wanted) {
@@ -289,11 +333,22 @@ namespace {
             if (maxSession > 0 &&
                 g_mintedThisSession >= static_cast<uint32_t>(maxSession)) break;
 
+            // Skip-list first: known-archived needs no re-HEAD (monotonic),
+            // known-refused needs no re-probe (oracle already answered).
+            // Both checks are lock-only, so skipped entries cost no I/O and
+            // no mint spacing.
+            if (IsKnownArchived(w.depot, w.gid)) { ++cached; continue; }
+            if (IsKnownRefused(w.depot, w.gid))  { ++skipped; continue; }
+
             // Already archived (likely supplied by another donor since the
             // list was fetched): skip the Steam call entirely. The probe is
             // a free edge hit, and the skip happens before the mint spacing
             // so it costs no time.
-            if (AlreadyCached(w.depot, w.gid)) { ++cached; continue; }
+            if (AlreadyCached(w.depot, w.gid)) {
+                RememberArchived(w.depot, w.gid);
+                ++cached;
+                continue;
+            }
 
             // Spacing goes before each mint rather than after it: the gap
             // between consecutive Steam calls is identical either way, but
@@ -328,14 +383,21 @@ namespace {
             auto fut = ManifestDonor::Request(appId, w.depot, w.gid);
             ++g_mintedThisSession;
             uint64_t code = 0;
-            if (fut.wait_for(kProbeTimeout) == std::future_status::ready)
+            bool answered = false;
+            if (fut.wait_for(kProbeTimeout) == std::future_status::ready) {
+                answered = true;
                 code = fut.get();
-            else
+            } else {
+                // No answer (disconnect, not a refusal): left uncached so
+                // the next cycle retries instead of suppressing for the TTL.
                 LOG_MANIFESTCH_WARN("ManifestDonor: probe timed out for depot={} gid={}",
                                     w.depot, w.gid);
+            }
 
             if (!code) {
                 ++refused;
+                if (answered)
+                    RememberRefused(w.depot, w.gid);
             } else {
                 const auto ageMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now() - mintedAt).count();
@@ -348,8 +410,8 @@ namespace {
         }
 
         LOG_MANIFESTCH_INFO("ManifestDonor: cycle done — {} minted, {} already archived, "
-                            "{} refused by Steam ({} this session)",
-                            minted, cached, refused, g_mintedThisSession);
+                            "{} refused by Steam, {} skipped from cache ({} this session)",
+                            minted, cached, refused, skipped, g_mintedThisSession);
 
         // One batch the moment the cycle ends: codes rotate within
         // minutes, so anything delaying this wastes the mint.
