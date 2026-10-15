@@ -91,6 +91,7 @@ add_library(LumaCore SHARED
     runtime/Diagnostics.cpp
     runtime/VehUtil.cpp
     runtime/RuntimeHttp.cpp
+    runtime/ManifestCache.cpp
     runtime/ManifestFetch.cpp
     runtime/ProtectionProbe.cpp
     runtime/RemoteTools.cpp
