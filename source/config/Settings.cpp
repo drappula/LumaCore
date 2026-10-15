@@ -21,7 +21,7 @@ namespace Settings {
         std::vector<std::string> DefaultManifestUrls()
         {
             return {
-                "https://manifest.opensteamtool.com/{gid}",
+                "https://manifest.opensteamtool.com/{appid}/{depotid}/{gid}",
                 "https://manifest.steam.run/api/manifest/{gid}",
                 "http://gmrc.wudrm.com/manifest/{gid}",
             };
@@ -47,6 +47,7 @@ namespace Settings {
             manifestFetchUrls = DefaultManifestUrls();
             manifestFetchTrustedHosts = DefaultManifestTrustedHosts();
             manifestFetchTimeoutSec = 12;
+            donate = DonateSettings{};
             statsEnableApi = true;
             processExtensionEnabled = false;
             processExtensionX86.clear();
@@ -168,6 +169,23 @@ namespace Settings {
                     }
                     manifestFetchTrustedHosts = std::move(allow);
                 }
+            }
+
+            // [donate]
+            // Absent section keeps defaults. Unknown keys ignored.
+            if (auto dn = tbl["donate"].as_table()) {
+                if (auto v = (*dn)["enabled"].value<bool>())
+                    donate.enabled = *v;
+                if (auto v = (*dn)["interval_secs"].value<int64_t>())
+                    donate.intervalSecs = static_cast<int>(*v);
+                if (auto v = (*dn)["wanted_refresh_secs"].value<int64_t>())
+                    donate.wantedRefreshSecs = static_cast<int>(*v);
+                if (auto v = (*dn)["max_mints_per_cycle"].value<int64_t>())
+                    donate.maxMintsPerCycle = static_cast<int>(*v);
+                if (auto v = (*dn)["min_mint_interval_ms"].value<int64_t>())
+                    donate.minMintIntervalMs = static_cast<int>(*v);
+                if (auto v = (*dn)["max_mints_per_session"].value<int64_t>())
+                    donate.maxMintsPerSession = static_cast<int>(*v);
             }
 
             // [stats]

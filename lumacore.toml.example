@@ -15,10 +15,11 @@ paths = []
 
 [manifest_fetch]
 # URL chain for depot manifest downloads, tried in order until one returns 200.
-# {gid} is replaced with the manifest GID at request time.
+# {gid} is replaced with the manifest GID at request time; {appid} and
+# {depotid} identify the depot being resolved (first provider needs them).
 # The first built-in provider needs a compatibility User-Agent; LumaCore adds it internally.
 urls = [
-    "https://manifest.opensteamtool.com/{gid}",
+    "https://manifest.opensteamtool.com/{appid}/{depotid}/{gid}",
     "https://manifest.steam.run/api/manifest/{gid}",
     "http://gmrc.wudrm.com/manifest/{gid}",
 ]
@@ -40,6 +41,25 @@ mirror = ""
 [stats]
 # Enable stats and achievement API
 enable_api = true
+
+[donate]
+# Contribute manifest request codes for depots THIS account owns, so other
+# users can download those games. Codes are minted on demand from your
+# signed-in Steam session and posted immediately (never stored). Only depots
+# you actually own are ever reported — the rest of your library is never
+# uploaded. Set enabled = false to opt out completely.
+enabled = true
+# Seconds to rest between mint cycles (default 30).
+interval_secs = 30
+# How often to re-pull the wanted list; minting still runs every cycle
+# (default 300 = 5 min).
+wanted_refresh_secs = 300
+# Max Steam code mints per cycle (default 25).
+max_mints_per_cycle = 25
+# Minimum gap between consecutive Steam calls, ms — the real rate cap (default 2000).
+min_mint_interval_ms = 2000
+# Total mints per Steam session; 0 = unlimited (default 0).
+max_mints_per_session = 0
 
 [process_extension]
 # Inject an extension DLL into game processes at launch

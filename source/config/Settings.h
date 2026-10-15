@@ -84,7 +84,7 @@ namespace Settings {
     // by Settings::Load: when present it OVERRIDES the chain (single-URL mode).
     // [manifest_fetch] urls = [...] takes precedence over the single form.
     inline std::vector<std::string> manifestFetchUrls = {
-        "https://manifest.opensteamtool.com/{gid}",
+        "https://manifest.opensteamtool.com/{appid}/{depotid}/{gid}",
         "https://manifest.steam.run/api/manifest/{gid}",
         "http://gmrc.wudrm.com/manifest/{gid}",
     };
@@ -95,6 +95,23 @@ namespace Settings {
     // healthy first provider doesn't pay the budget of the slow ones.
     inline int manifestFetchTimeoutSec = 12;
     inline std::vector<std::string> manifestFetchTrustedHosts;
+
+    // [donate]
+    // Contribute manifest request codes for depots this account owns so
+    // other users can download those games. Codes are minted on demand
+    // from the signed-in Steam session and posted immediately (never
+    // stored). Only depots actually owned are ever reported. Absent
+    // section keeps these defaults; enabled=false opts out completely.
+    // Consumed by the donor loop (interval/caps); see lumacore.toml.example.
+    struct DonateSettings {
+        bool enabled = true;
+        int intervalSecs = 30;
+        int wantedRefreshSecs = 300;
+        int maxMintsPerCycle = 25;
+        int minMintIntervalMs = 2000;
+        int maxMintsPerSession = 0;
+    };
+    inline DonateSettings donate;
     inline bool statsEnableApi = true;
     inline bool processExtensionEnabled = false;
     inline std::string processExtensionX86;
