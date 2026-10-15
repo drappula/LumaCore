@@ -47,6 +47,11 @@ namespace LuaLoader {
             && !FamilySharedAppIdSet.count(depotId);
     }
 
+    bool IsDepotDeclared(AppId_t depotId) {
+        using namespace Internal;
+        return DepotKeySet.count(depotId) > 0;
+    }
+
     bool IsOwned(AppId_t appId) {
         using namespace Internal;
         return OwnedAppIdSet.count(appId) > 0;

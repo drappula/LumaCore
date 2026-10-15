@@ -153,7 +153,7 @@ namespace {
             // Only pDepotInfo is tested. pSharedDepotInfo holds depots belonging
             // to OTHER apps (sharedinstall / depotfromapp redirects), so it says
             // nothing about whether this app's own config is sound.
-            if (AppId != 0 && pDepotInfo->m_Size == 0 && LuaLoader::HasDepot(AppId)) {
+            if (AppId != 0 && pDepotInfo->m_Size == 0 && LuaLoader::IsDepotDeclared(AppId)) {
                 LOG_MANBND_WARN("BuildDepotDependency: app {} returned 0 depots (appinfo mid-refresh) — failing the call so Steam keeps its existing depot config instead of storing an empty one", AppId);
                 return false;
             }

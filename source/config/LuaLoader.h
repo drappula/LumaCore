@@ -16,6 +16,12 @@
 
 namespace LuaLoader {
     bool HasDepot(AppId_t appId);
+    // Pure DepotKeySet membership: true for every appid a lua declares
+    // depots for, regardless of owned / family-shared status. Unlike
+    // HasDepot (which excludes Steam-provided apps), this is the exact
+    // "lua declares depots" set — the scope the BuildDepotDependency
+    // empty-config guard must test.
+    bool IsDepotDeclared(AppId_t depotId);
     bool IsOwned(AppId_t appId);
     bool IsFamilySharedApp(AppId_t appId);
     bool IsSteamProvidedApp(AppId_t appId);
