@@ -4,9 +4,13 @@
 // See <https://www.gnu.org/licenses/> for the full license text.
 
 #include "hooks/client/NetPacket.h"
+#include "hooks/client/ManifestBind.h"
 #include "config/LuaLoader.h"
+#include "runtime/ManifestCache.h"
 #include "runtime/ManifestFetch.h"
 #include "runtime/Logger.h"
+
+#include <thread>
 
 namespace NetPacket::Handlers::DepotFallback {
 
@@ -38,8 +42,40 @@ bool HandleSend(const uint8_t* pBody, uint32_t cbBody,
     }
     const uint64_t jobId = hdr.jobid_source();
 
+    // Owned-depot bypass: BuildDepotDependency recorded what Steam itself
+    // believes for this depot. When it belongs to an app the account owns,
+    // Steam's genuine request code works — skip the fetch injection and
+    // leave Steam's own code alone.
+    AppId_t seenApp = 0;
+    uint64_t seenGid = 0;
+    if (ManifestBind::LookupDepot(depotId, seenApp, seenGid) &&
+        seenApp && LuaLoader::IsOwned(seenApp)) {
+        LOG_PKTRT_INFO("{{\"evt\":\"DepotFallback\",\"act\":\"send\",\"bypass\":\"owned\",\"depot\":{},\"app\":{},\"msg\":\"belongs to owned app {}, leaving Steam's own code alone\"}}",
+                   depotId, seenApp, seenApp);
+        return false;
+    }
+
     LOG_PKTRT_INFO("{{\"evt\":\"DepotFallback\",\"act\":\"send\",\"depot\":{},\"gid\":{},\"app\":{},\"job\":{}}}",
                depotId, gid, appId, jobId);
+
+    // Pre-seed <Steam>\depotcache from the archive for the EXACT manifest
+    // Steam is asking a code for. Detached + best-effort: this runs on a
+    // Steam net thread, so it must never block. v1 uses bypass=false
+    // always — no download-activity signal exists yet, so scheduled-update
+    // retries ride the negative cache instead of hammering the archive.
+    {
+        const AppId_t  preApp   = appId;
+        const uint32_t preDepot = depotId;
+        const uint64_t preGid   = gid;
+        std::thread([preApp, preDepot, preGid]() {
+            bool notArchived = false;
+            const bool ok = ManifestCache::EnsureCached(
+                preApp, preDepot, preGid, 0, &notArchived, false);
+            if (!ok && notArchived)
+                ManifestBind::ReportMissingManifest(preDepot, preGid);
+        }).detach();
+    }
+
     ManifestFetch::Submit(jobId, gid, appId, depotId);
     return false;
 }

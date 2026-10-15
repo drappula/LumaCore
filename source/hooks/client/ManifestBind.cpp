@@ -7,11 +7,15 @@
 #include "hooks/Macros.h"
 #include "core/entry.h"
 #include "runtime/ManifestCache.h"
+#include <windows.h>
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <format>
 #include <mutex>
 #include <set>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 
@@ -40,6 +44,17 @@ namespace ManifestBind::Internal {
     // download re-requests every ~30 s; the user only needs one warning.
     std::set<std::pair<uint32_t, uint64_t>> g_notifiedMissing;
     std::mutex g_missingMutex;
+
+    // When a pre-seed finds manifests that are not archived yet (404), the
+    // depots are collected here and, after a short quiet window, surfaced
+    // in one MessageBox — so a whole multi-depot install produces a single
+    // "these aren't ready, try again later" prompt instead of one box per
+    // depot. g_missGen is the debounce generation: a newer miss during the
+    // wait steals it and its own waiter shows the box.
+    constexpr int    kMissNotifyDebounceMs = 3000; // quiet window before showing
+    constexpr size_t kMissNotifyMaxLines   = 20;   // cap the listed depots
+    std::set<std::pair<uint32_t, uint64_t>> g_missing; // pending batch
+    std::atomic<uint64_t> g_missGen{0};               // debounce generation
 
     void RecordDepots(const CUtlVector<DepotEntry>* vec) {
         if (!vec || !vec->m_Size || !vec->m_Memory.m_pMemory) return;
@@ -223,11 +238,46 @@ namespace ManifestBind {
     }
 
     void ReportMissingManifest(uint32_t depotId, uint64_t gid) {
+        uint64_t gen;
         {
             std::lock_guard<std::mutex> lock(Internal::g_missingMutex);
+            // Once per (depot,gid) per session: a stuck download
+            // re-requests every ~30 s, but the user only needs one warning.
             if (!Internal::g_notifiedMissing.emplace(depotId, gid).second) return;
+            Internal::g_missing.emplace(depotId, gid);
+            gen = ++Internal::g_missGen;
         }
         LOG_MANBND_WARN("manifest depot={} gid={} not archived yet (404) — queued, retry the download in a little while",
             depotId, gid);
+        // Detached waiter shows the box after a quiet window, never on a
+        // Steam thread (raw MessageBoxA on a detached std::thread mirrors
+        // the BootDiag popup idiom — the repo has no dialog wrapper).
+        std::thread([gen]() {
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(Internal::kMissNotifyDebounceMs));
+            // A newer miss arrived during the wait — let its waiter show it.
+            if (Internal::g_missGen.load() != gen) return;
+            std::set<std::pair<uint32_t, uint64_t>> snapshot;
+            {
+                std::lock_guard<std::mutex> lock(Internal::g_missingMutex);
+                snapshot.swap(Internal::g_missing);
+            }
+            if (snapshot.empty()) return;
+            std::string body = std::format(
+                "Missing {} manifest(s) from the cache - not archived yet.\n"
+                "They've been queued; try the download again in a little while.\n\n"
+                "depot;manifestid\n", snapshot.size());
+            size_t shown = 0;
+            for (const auto& [depot, manifestGid] : snapshot) {
+                if (shown >= Internal::kMissNotifyMaxLines) {
+                    body += std::format("...and {} more", snapshot.size() - shown);
+                    break;
+                }
+                body += std::format("{};{}\n", depot, manifestGid);
+                ++shown;
+            }
+            MessageBoxA(nullptr, body.c_str(), "LumaCore - manifests not ready",
+                        MB_OK | MB_ICONWARNING | MB_SETFOREGROUND);
+        }).detach();
     }
 }
