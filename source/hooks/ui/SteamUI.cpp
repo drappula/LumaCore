@@ -254,9 +254,18 @@ namespace {
             {
                 for (AppId_t appId : drainingRemovals)
                 {
-                    if (LuaLoader::IsOwned(appId))
+                    // A removal is only legitimate when the app is no longer
+                    // Lua-managed. NotifyLicenseChanged can queue add+remove
+                    // for the same root in one pass (a DirWatch harvest doubles
+                    // ParseFile, so UnloadFile -> ParseFile cycles every depot
+                    // and library root); the ISLuaTrackedApp check here is the
+                    // final guard against clearing the owned flag on a root
+                    // that was just re-declared. IsOwned alone misses Lua apps:
+                    // Bind_addappid erases them from OwnedAppIdSet by design.
+                    if (LuaLoader::IsOwned(appId)
+                        || LuaLoader::IsLuaTrackedApp(appId))
                     {
-                        LOG_STEAMUICH_DEBUG("RunFrame: appId {} is owned again, skipping removal", appId);
+                        LOG_STEAMUICH_DEBUG("RunFrame: appId {} is owned or still Lua-tracked, skipping removal", appId);
                         continue;
                     }
                     if (CSteamApp* pApp = static_cast<CSteamApp*>(oGetAppByID(pController, appId, false)))

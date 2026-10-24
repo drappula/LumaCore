@@ -835,7 +835,14 @@ namespace SteamCapture {
         }
         uint32_t queuedRemovals = 0;
         for (AppId_t id : removals) {
-            if (removedLibraryRoots.count(id)) {
+            // A hot-reload pass can list the same library root in BOTH the
+            // removals (UnloadFile) and additions (re-parse) sets. The
+            // additions loop above already cancelled any queued removal and
+            // queued a touch for it; re-queueing the removal afterwards lets
+            // the RunFrame drain clear the app's owned flag and drop a card
+            // that was just re-declared. Only queue a removal when the root
+            // is truly gone from the Lua set.
+            if (removedLibraryRoots.count(id) && !libraryRoots.count(id)) {
                 SteamUI::QueueLibraryRemoval(id);
                 ++queuedRemovals;
             }
